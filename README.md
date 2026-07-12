@@ -1,3 +1,5 @@
+Just a test project to test vibe-coding - Don't expect it to work
+
 # Power Analyser
 
 Victorian residential electricity plan comparison tool.
