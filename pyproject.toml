@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "power-analyser"
+version = "0.1.0"
+description = "Victorian residential electricity plan comparison tool"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pandas>=2.1",
+    "numpy>=1.26",
+    "pydantic>=2.5",
+    "eval_type_backport>=0.2",
+    "python-dotenv>=1.0",
+    "customtkinter>=5.2",
+    "matplotlib>=3.8",
+    "playwright>=1.40",
+    "requests>=2.31",
+    "openai>=1.6",
+    "zhipuai>=2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+
+[project.scripts]
+power-analyser = "power_analyser.gui.app:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-v"
+
+[tool.setuptools.packages.find]
+where = ["src"]

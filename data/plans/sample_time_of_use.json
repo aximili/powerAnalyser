@@ -1,0 +1,35 @@
+{
+  "plan_id": "sample_tou",
+  "retailer": "Sample Retailer B",
+  "plan_name": "Flex Saver (Time of Use)",
+  "valid_from": "2024-01-01",
+  "valid_to": "2025-12-31",
+  "daily_supply_charge": "0.9800",
+  "usage_tiers": [
+    {
+      "name": "Peak",
+      "rate": "0.4100",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri"],
+          "start": "07:00",
+          "end": "23:00"
+        }
+      ]
+    },
+    {
+      "name": "Off-Peak",
+      "rate": "0.1750",
+      "schedule": []
+    }
+  ],
+  "free_windows": [],
+  "fit_tiers": [
+    {
+      "name": "Solar FiT",
+      "rate": "0.0500",
+      "schedule": []
+    }
+  ],
+  "step_tariffs": []
+}
