@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
@@ -50,6 +50,10 @@ class ComparisonEntry:
     # Load-shift scenario (None when no ElasticityConfig was provided for this plan)
     simulated_net: Decimal | None = None
     shift_saving: Decimal | None = None  # baseline_net - simulated_net (positive = saving)
+
+    # Informational metadata forwarded from the plan (not used in cost math)
+    last_updated: str | None = None  # ISO-8601 capture time
+    conditions: list[str] = field(default_factory=list)  # eligibility notes
 
 
 @dataclass
@@ -104,6 +108,8 @@ class ComparisonEngine:
                     plan_id=plan.plan_id,
                     plan_name=plan.plan_name,
                     retailer=plan.retailer,
+                    last_updated=plan.last_updated,
+                    conditions=list(plan.conditions),
                     baseline_supply=baseline.total_supply,
                     baseline_usage=baseline.total_usage,
                     baseline_solar_credit=baseline.total_solar_credit,

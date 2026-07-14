@@ -4,6 +4,32 @@ This document covers the AI browser agent component (Part 2) of Power Analyser.
 
 ---
 
+## Workflow for AI agents (read first)
+
+When changing any code in this repository:
+
+1. **Run the tests after every edit** (the full suite is offline — mocked LLM,
+   no browser, no network):
+   ```bash
+   python -m pytest tests/ -v
+   ```
+   Windows venv: `.venv\Scripts\python.exe -m pytest tests/ -v`
+2. **Update or add tests** for any behavioural change. Agent tests live in
+   `tests/agent/` and use `MockLLMProvider` / `ScriptedLLMProvider` (no real
+   LLM). The orchestrator loop is testable without Playwright via its
+   `browser_factory` parameter (see `tests/agent/test_orchestrator.py`).
+   Keep every test offline.
+3. **Keep docs in sync** — update `README.md` and this file when user-facing
+   behaviour, tabs, prompts, schemas, or config keys change.
+4. **Never commit secrets.** `.env` and `.gui_settings.json` are gitignored;
+   don't put real API keys into code, tests, or docs.
+5. For GUI changes, sanity-check with `python -m py_compile` and, where
+   possible, construct the window then destroy it immediately
+   (`app = PowerAnalyserApp(); app.update(); app.destroy()`) to catch wiring
+   errors.
+
+---
+
 ## Overview
 
 The agent autonomously navigates electricity retailer websites, fills in household profile forms (state, postcode, usage), and extracts plan pricing into the `ElectricityPlan` JSON schema used by the comparison engine.
@@ -64,6 +90,25 @@ The factory `create_provider(config)` in `agent/llm/base.py` dispatches on `conf
 
 The loop stops when the LLM returns `done`, when extraction is complete, or when `MAX_AGENT_ITERATIONS` is reached.
 
+### Extraction resilience
+
+The original agent would run `extract` once, get 0 plans, and immediately
+declare `done`. The loop now defends against this:
+
+- Every extraction result (including **0 plans**) is written into the action
+  history, so the LLM knows whether it actually succeeded.
+- When text extraction yields nothing, the orchestrator **automatically
+  retries with a page screenshot** (`BrowserController.get_screenshot()`).
+  The screenshot prompt also embeds the page text, so a text-only model (e.g.
+  a local Gemma/Llama without vision) still has content to work with.
+- The agent is **not allowed to stop with `done` while zero plans have been
+  found**, until up to `_MAX_FORCED_EXTRACTS` (3) forced screenshot extractions
+  have been attempted.
+- The Stop button calls `orchestrator.request_stop()`, which halts the loop
+  cleanly after the current action.
+- `run()` accepts an optional `browser_factory` so the loop can be tested
+  without Playwright (see `tests/agent/test_orchestrator.py`).
+
 ---
 
 ## CAPTCHA Handling
@@ -89,8 +134,13 @@ If you encounter a site whose CAPTCHA is not detected, add the relevant selector
 `PlanExtractor` in `agent/extractors/plan_extractor.py` asks the LLM to parse page content into `ElectricityPlan` JSON:
 
 - Sends page text (or screenshot for JS-heavy pages) with a structured prompt embedding the exact schema
+- Accepts either a JSON array **or** a single `{...}` object (smaller models often omit the array brackets)
 - Strips markdown fences from the response
-- Parses and pydantic-validates each entry; skips (with a warning) any entry that fails
+- Runs a bounded **repair pass**: entries that fail pydantic validation are sent back to the LLM together with the validation errors, and the corrected output is merged (de-duplicated by `plan_id`). Set `max_repair_attempts` on the constructor (default 1) to tune/disable this.
+- For screenshots, the page text is embedded in the prompt as well, so text-only models still receive content
+- `extract_from_screenshot_with_context(bytes, retailer, plan_name, page_text="")` is the entry point for the **Manual** tab: the retailer/plan name are supplied by the user and forced onto the result (`_apply_context`), so the model only reads the rates. When `page_text` is supplied (e.g. text extracted from an uploaded PDF), it is embedded in the prompt so text-only models and text-based documents work without OCR.
+- `last_updated` is **never** asked of the model — `PlanExtractor._finalize` stamps it with the capture time (`datetime.now().astimezone().isoformat()`) on every extracted plan. Hand-authored JSON loaded via `load_plan` bypasses this, so the file value is preserved.
+- `conditions` (eligibility/discount strings, e.g. "Direct debit required") **is** part of the extraction schema block and prompt, so the model populates it from the page when present.
 - Returns `list[ElectricityPlan]`
 
 The extractor is independent of the orchestrator and can be called directly:
@@ -133,17 +183,46 @@ AGENT_HEADLESS=false         # true = no visible browser window
 6. Watch the live log; solve any CAPTCHAs manually and click **Resume**
 7. Extracted plans appear in the **Analyse** tab automatically
 
+### Manual rate extraction (no browser)
+
+When you already have the rates on screen (or in a PDF), skip the autonomous
+browser and extract a plan straight from a screenshot or PDF:
+
+1. Open the **Manual** tab (LLM config is shared with the Agent tab)
+2. Enter the **provider (retailer) name** (required) and optionally the **plan name**
+3. **Paste** a screenshot of the rates (`Ctrl+V` / `Cmd+V`), click **Browse…**,
+   or drag & drop an image **or PDF** file
+4. Click **Extract Plan**
+
+`PlanExtractor.extract_from_screenshot_with_context()` is used: because the
+retailer (and optionally plan name) are supplied, smaller local models only
+need to read the rates — which is far more reliable than identifying the brand
+from the image. Extracted plans flow into the **Analyse** tab automatically.
+
+**PDFs** (`.pdf`) are rendered with PyMuPDF (`agent/extractors/pdf_utils.py`):
+the pages are stitched into one image (fed to a vision model) and their text is
+extracted and embedded in the prompt (so text-only models and selectable-text
+rate sheets work too). PDFs are accepted via **Browse…** and drag & drop (not
+clipboard paste). If PyMuPDF is missing, a clear error is shown.
+
 ---
 
 ## Running Tests
 
-The agent tests use `MockLLMProvider` (no real LLM, no network):
+The suite runs fully offline — no API keys, no real browser:
 
 ```bash
-PYTHONPATH=src python -m pytest tests/agent/ -v
+python -m pytest tests/ -v
 ```
 
-9 tests cover plan extraction: valid JSON, partial validity, markdown fences, empty responses, image hints, and prompt content verification.
+- `tests/agent/` — plan extraction (`MockLLMProvider`) and the orchestrator
+  loop (`ScriptedLLMProvider` + a fake browser via `browser_factory`).
+- `tests/core/` — NEM12 parsing, ingestion, tariff schema, cost calculator,
+  load-shift elasticity.
+- `tests/test_settings.py` — GUI settings persistence.
+
+When you add or change behaviour, add a test alongside it (see the workflow
+section at the top of this file).
 
 ---
 

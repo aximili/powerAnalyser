@@ -32,6 +32,31 @@ class MockLLMProvider(LLMProvider):
         return self.response
 
 
+class ScriptedLLMProvider(LLMProvider):
+    """Returns successive responses from a list, one per call.
+
+    Useful for testing the extractor's repair pass and the orchestrator loop,
+    where the model's behaviour changes between calls.  Records every prompt
+    in ``prompts`` and tracks whether a vision (image) call was made.
+    """
+
+    def __init__(self, responses: list[str]) -> None:
+        self._responses = list(responses)
+        self.prompts: list[str] = []
+        self.image_calls = 0
+        self.text_calls = 0
+
+    def complete(self, prompt: str) -> str:
+        self.prompts.append(prompt)
+        self.text_calls += 1
+        return self._responses.pop(0) if self._responses else ""
+
+    def complete_with_image(self, prompt: str, image_bytes: bytes) -> str:
+        self.prompts.append(prompt)
+        self.image_calls += 1
+        return self._responses.pop(0) if self._responses else ""
+
+
 @pytest.fixture
 def mock_provider():
     return MockLLMProvider()

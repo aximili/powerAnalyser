@@ -8,6 +8,9 @@ python-dotenv>=1.0
 # GUI
 customtkinter>=5.2
 matplotlib>=3.8
+Pillow>=10.0           # screenshot paste/preview in the Manual tab
+PyMuPDF>=1.24          # PDF → image/text for the Manual tab rate upload
+tkinterdnd2>=0.4  # optional at runtime — enables NEM12 drag & drop
 
 # AI agent
 playwright>=1.40

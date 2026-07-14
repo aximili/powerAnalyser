@@ -4,6 +4,8 @@
   "plan_name": "Simple Saver (Flat Rate)",
   "valid_from": "2024-01-01",
   "valid_to": "2025-12-31",
+  "last_updated": "2026-07-14T11:30:00+10:00",
+  "conditions": [],
   "daily_supply_charge": "0.9200",
   "usage_tiers": [
     {

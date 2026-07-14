@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "power-analyser"
@@ -16,6 +16,9 @@ dependencies = [
     "python-dotenv>=1.0",
     "customtkinter>=5.2",
     "matplotlib>=3.8",
+    "Pillow>=10.0",
+    "PyMuPDF>=1.24",
+    "tkinterdnd2>=0.4",
     "playwright>=1.40",
     "requests>=2.31",
     "openai>=1.6",

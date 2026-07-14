@@ -1,5 +1,3 @@
-Just a test project to test vibe-coding - Don't expect it to work
-
 # Power Analyser
 
 Victorian residential electricity plan comparison tool.
@@ -16,7 +14,8 @@ An optional AI agent (Part 2) can autonomously browse retailer websites and extr
 - **Tariff types** — flat rate, time-of-use, 3-part "smart rate", free midday windows (with fair-use caps), solar feed-in, step tariffs
 - **Load-shift simulation** — move EV charging / pool pump into free or cheap windows; see how much you save
 - **Ranked comparison** — plans sorted by net annual cost with per-plan supply / usage / solar breakdown
-- **AI browser agent** — navigates retailer websites, fills suburb/usage forms, extracts plan pricing (supports Ollama, GLM/Zhipu AI, OpenAI-compatible APIs)
+- **AI browser agent** — navigates retailer websites, fills suburb/usage forms, extracts plan pricing (supports Ollama, GLM/Zhipu AI, OpenAI-compatible APIs); with screenshot fallback + a self-repair extraction pass for smaller local models
+- **Manual rate extract** — paste a screenshot or upload a PDF of a retailer's rate page (with provider/plan name) and extract the plan straight into the comparison
 - **Desktop GUI** — CustomTkinter cross-platform app (Windows + Mac) with embedded matplotlib charts
 
 ---
@@ -34,18 +33,32 @@ An optional AI agent (Part 2) can autonomously browse retailer websites and extr
 
 ```bash
 # 1. Clone / download the project
-cd test-power-analyse
+cd powerAnalyser
 
-# 2. Install dependencies
+# 2. Create and activate a virtual environment (recommended)
+python -m venv .venv
+# Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# macOS / Linux:
+source .venv/bin/activate
+
+# 3. Install dependencies (third-party packages)
 pip install -r requirements.txt
 
-# 3. Install Playwright browser (only needed for the agent)
+# 4. Install the package itself (editable, so `python -m power_analyser...` works)
+pip install -e .
+
+# 5. Install Playwright browser (only needed for the agent)
 playwright install chromium
 
-# 4. Copy and edit the environment template
-cp .env.example .env
+# 6. Copy and edit the environment template
+cp .env.example .env   # Windows: copy .env.example .env
 # Edit .env with your LLM provider settings
 ```
+
+> Make sure the virtual environment is activated whenever you run the app or
+> the tests. If `python` points at an unrelated interpreter (e.g. another
+> project's venv), the `import power_analyser` step will fail.
 
 ---
 
@@ -62,7 +75,8 @@ Three tabs:
 | Tab | Purpose |
 |---|---|
 | **Analyse** | Load NEM12 file, add plan JSONs, configure load-shift, run comparison |
-| **Agent** | Set LLM provider and target URL; agent extracts plans automatically |
+| **Agent** | Set LLM provider and target URL; agent browses and extracts plans automatically |
+| **Manual** | Paste/upload a rate-page screenshot or PDF (+ provider/plan name) and extract a plan without the browser |
 | **Results** | Ranked table, cost breakdown bar chart, load-shift delta report, CSV export |
 
 ### CLI smoke-test (no GUI)
@@ -77,7 +91,7 @@ python -m power_analyser.core.comparison.report \
 
 ## Plan JSON format
 
-Plans live in `data/plans/` as JSON files.  See `data/plans/smart_rate_free_window.json` for a full example including a free midday window, step tariff, and time-varying FiT.
+Plans live in `data/plans/` as JSON files. **See [`docs/plan-schema.md`](docs/plan-schema.md) for the full field reference, the `schedule` semantics, and worked examples for every tariff type** (flat, time-of-use, smart rate, step tariff, free windows, time-varying FiT).
 
 Minimum valid flat-rate plan:
 
@@ -96,26 +110,26 @@ Minimum valid flat-rate plan:
 }
 ```
 
-Key rules:
+Key rules (full detail in [`docs/plan-schema.md`](docs/plan-schema.md)):
 - All rates are **decimal strings** in `$/kWh` (supply charge in `$/day`)
-- An **empty `schedule`** means the tier applies at all times
-- Day names: `Mon Tue Wed Thu Fri Sat Sun`
-- Times in 24-hour `HH:MM`
-- `overflow_tier` in a free window must match the `name` of an existing `usage_tier`
+- An **empty `schedule`** means the tier applies at all times (a flat/catch-all rate)
+- Day names: `Mon Tue Wed Thu Fri Sat Sun`; times in 24-hour `HH:MM`; overnight windows wrap midnight when `end <= start`
+- `overflow_tier` / `tier_below` / `tier_above` must match an existing `usage_tiers[].name`
+- Optional informational fields: `valid_from`/`valid_to`, `last_updated` (ISO-8601 capture time — auto-stamped by the agent), and `conditions` (e.g. `["Direct debit required"]`)
 
 ---
 
 ## Running tests
 
 ```bash
-PYTHONPATH=src python -m pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
-The test suite (46 tests) runs fully offline — no API keys, no real browser.
+The test suite (68 tests) runs fully offline — no API keys, no real browser.
 
 ```
 tests/core/     — NEM12 parsing, ingestion, tariff schema, cost calculator, elasticity
-tests/agent/    — plan extractor with a mock LLM provider
+tests/agent/    — plan extractor + orchestrator loop (mock/scripted LLM provider, no browser)
 ```
 
 ---
@@ -146,6 +160,9 @@ src/power_analyser/
 data/
   sample_nem12.csv           # 7-day synthetic NEM12 (includes DST spring-forward)
   plans/                     # Sample plan JSONs
+
+docs/
+  plan-schema.md             # Full plan JSON field reference + worked examples
 ```
 
 ---
@@ -166,7 +183,10 @@ Copy `.env.example` to `.env` and fill in as needed:
 | `AGENT_HEADLESS` | `false` | Run browser headlessly (set `true` for CI) |
 | `DATA_DIR` | `data` | Default directory for NEM12 files and plans |
 
----
+> GUI field values (NEM12 path, LLM provider/model/key, target URL, task
+> prompt) are cached in a project-root `.gui_settings.json` so they're
+> remembered across restarts. LLM fields also fall back to your `.env` on first
+> run. Both files are gitignored — don't commit real keys.---
 
 ## Victorian tariff notes
 

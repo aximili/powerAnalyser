@@ -116,6 +116,12 @@ class ElectricityPlan(BaseModel):
     plan_name: str
     valid_from: str | None = None   # ISO date string, informational only
     valid_to: str | None = None     # ISO date string, informational only
+    last_updated: str | None = None  # ISO-8601 datetime, informational only
+    conditions: list[str] = Field(
+        default_factory=list,
+        description="Eligibility/discount conditions for these rates, e.g. "
+        "'Direct debit required'; informational only",
+    )
     daily_supply_charge: Decimal = Field(ge=0, description="Fixed cost in $/day")
     usage_tiers: list[UsageTier] = Field(min_length=1)
     free_windows: list[FreeWindow] = Field(default_factory=list)

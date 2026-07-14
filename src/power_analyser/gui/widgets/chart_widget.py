@@ -30,14 +30,14 @@ class ChartWidget(ctk.CTkFrame):
             return
 
         self._figure = Figure(figsize=(width / 100, height / 100), dpi=100, tight_layout=True)
-        self._canvas = FigureCanvasTkAgg(self._figure, master=self)
-        self._canvas.get_tk_widget().pack(fill="both", expand=True)
+        self._mpl_canvas = FigureCanvasTkAgg(self._figure, master=self)
+        self._mpl_canvas.get_tk_widget().pack(fill="both", expand=True)
 
     def clear(self) -> None:
         if not _MATPLOTLIB_AVAILABLE:
             return
         self._figure.clear()
-        self._canvas.draw()
+        self._mpl_canvas.draw()
 
     def plot_breakdown(self, comparison_result) -> None:
         """Render a stacked bar chart of supply / usage / solar for each plan.
@@ -72,7 +72,7 @@ class ChartWidget(ctk.CTkFrame):
         ax.legend(fontsize=8)
         ax.axhline(0, color="black", linewidth=0.5)
 
-        self._canvas.draw()
+        self._mpl_canvas.draw()
 
     def plot_delta(self, comparison_result) -> None:
         """Render a horizontal bar chart of load-shift savings per plan."""
@@ -97,4 +97,4 @@ class ChartWidget(ctk.CTkFrame):
         ax.set_title("Load-Shift Savings vs Baseline")
         ax.axvline(0, color="black", linewidth=0.5)
 
-        self._canvas.draw()
+        self._mpl_canvas.draw()

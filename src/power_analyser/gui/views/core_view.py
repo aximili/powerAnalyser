@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import customtkinter as ctk
 
@@ -20,6 +20,31 @@ from power_analyser.core.tariff.loader import load_plan, load_plans_dir
 from power_analyser.core.tariff.schema import ElectricityPlan
 
 
+def _parse_dropped_files(data: str) -> list[str]:
+    """Parse a tkdnd ``<<Drop>>`` payload into a list of file paths.
+
+    tkdnd separates multiple files with spaces and wraps paths that contain
+    spaces (or the platform's path with a drive letter) in ``{...}``.
+    """
+    files: list[str] = []
+    i, n = 0, len(data)
+    while i < n:
+        if data[i] == "{":
+            end = data.find("}", i)
+            if end == -1:
+                break
+            files.append(data[i + 1 : end])
+            i = end + 1
+        else:
+            end = data.find(" ", i)
+            if end == -1:
+                files.append(data[i:])
+                break
+            files.append(data[i:end])
+            i = end + 1
+    return [f.strip() for f in files if f.strip()]
+
+
 class CoreView(ctk.CTkFrame):
     """Tab 1 — file inputs, plan list, load-shift configuration, Run button."""
 
@@ -27,14 +52,19 @@ class CoreView(ctk.CTkFrame):
         self,
         parent,
         on_result: Callable[[ComparisonResult], None],
+        settings: Optional[dict[str, Any]] = None,
         **kwargs,
     ) -> None:
         super().__init__(parent, **kwargs)
         self._on_result = on_result
+        self._settings = settings or {}
         self._nem12_path: Optional[Path] = None
+        self._dnd_active = False
         self._plans: list[ElectricityPlan] = []
 
         self._build_ui()
+        self._apply_settings()
+        self._setup_dnd()
 
     # ── Layout ─────────────────────────────────────────────────────────────────
 
@@ -42,14 +72,16 @@ class CoreView(ctk.CTkFrame):
         self.columnconfigure(0, weight=1)
 
         # ── NEM12 file picker ──
-        nem12_frame = ctk.CTkFrame(self)
-        nem12_frame.grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
-        nem12_frame.columnconfigure(1, weight=1)
+        self._nem12_frame = ctk.CTkFrame(self)
+        self._nem12_frame.grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
+        self._nem12_frame.columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(nem12_frame, text="NEM12 file:").grid(row=0, column=0, padx=8, pady=8, sticky="w")
-        self._nem12_entry = ctk.CTkEntry(nem12_frame, placeholder_text="No file selected")
+        ctk.CTkLabel(self._nem12_frame, text="NEM12 file:").grid(row=0, column=0, padx=8, pady=8, sticky="w")
+        self._nem12_entry = ctk.CTkEntry(
+            self._nem12_frame, placeholder_text="Drag & drop a file here, or click Browse…"
+        )
         self._nem12_entry.grid(row=0, column=1, padx=8, pady=8, sticky="ew")
-        ctk.CTkButton(nem12_frame, text="Browse…", width=90, command=self._pick_nem12).grid(
+        ctk.CTkButton(self._nem12_frame, text="Browse…", width=90, command=self._pick_nem12).grid(
             row=0, column=2, padx=8, pady=8
         )
 
@@ -109,16 +141,27 @@ class CoreView(ctk.CTkFrame):
 
     # ── File pickers ───────────────────────────────────────────────────────────
 
+    def _set_nem12_path(self, path: Path) -> bool:
+        """Adopt *path* as the current NEM12 file if it exists.
+
+        Returns ``True`` when the path was accepted.
+        """
+        if not path.exists() or not path.is_file():
+            messagebox.showerror("File not found", f"Could not find:\n{path}")
+            return False
+        self._nem12_path = path
+        self._nem12_entry.delete(0, "end")
+        self._nem12_entry.insert(0, str(path))
+        self._set_status(f"NEM12: {path.name}")
+        return True
+
     def _pick_nem12(self) -> None:
         path = filedialog.askopenfilename(
             title="Select NEM12 file",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
         if path:
-            self._nem12_path = Path(path)
-            self._nem12_entry.delete(0, "end")
-            self._nem12_entry.insert(0, str(self._nem12_path))
-            self._set_status(f"NEM12: {self._nem12_path.name}")
+            self._set_nem12_path(Path(path))
 
     def _add_plan_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -156,6 +199,47 @@ class CoreView(ctk.CTkFrame):
         for plan in self._plans:
             self._plan_listbox.insert("end", f"• {plan.retailer} — {plan.plan_name}\n")
         self._plan_listbox.configure(state="disabled")
+
+    # ── Drag & drop ────────────────────────────────────────────────────────────
+
+    def _setup_dnd(self) -> None:
+        """Register the NEM12 input box as a file drop target if tkdnd is present.
+
+        tkdnd is optional — if it (or the native library) is unavailable the app
+        simply falls back to the Browse button.
+        """
+        try:
+            from tkinterdnd2 import DND_FILES
+        except ImportError:
+            return
+        try:
+            self._nem12_frame.drop_target_register(DND_FILES)
+            self._nem12_frame.dnd_bind("<<Drop>>", self._on_nem12_drop)
+            self._nem12_entry.drop_target_register(DND_FILES)
+            self._nem12_entry.dnd_bind("<<Drop>>", self._on_nem12_drop)
+            self._dnd_active = True
+        except Exception:
+            self._dnd_active = False
+
+    def _on_nem12_drop(self, event) -> None:
+        files = _parse_dropped_files(getattr(event, "data", ""))
+        if files:
+            self._set_nem12_path(Path(files[0]))
+
+    # ── Settings persistence ───────────────────────────────────────────────────
+
+    def _apply_settings(self) -> None:
+        """Restore the previously-chosen NEM12 path if it still exists."""
+        stored = self._settings.get("nem12_path", "")
+        if stored:
+            path = Path(stored)
+            if path.exists() and path.is_file():
+                self._nem12_path = path
+                self._nem12_entry.insert(0, str(path))
+
+    def collect_state(self, settings: dict[str, Any]) -> None:
+        """Write the current NEM12 path into *settings* for persistence."""
+        settings["nem12_path"] = str(self._nem12_path) if self._nem12_path else ""
 
     # ── Add plans injected from agent ─────────────────────────────────────────
 

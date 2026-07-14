@@ -4,6 +4,8 @@
   "plan_name": "Smart Saver (3-Part + Midday Power Saver)",
   "valid_from": "2024-01-01",
   "valid_to": "2025-12-31",
+  "last_updated": "2026-07-14T11:30:00+10:00",
+  "conditions": ["Direct debit required", "Pay-on-time discount included"],
   "daily_supply_charge": "1.0500",
   "usage_tiers": [
     {

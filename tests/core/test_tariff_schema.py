@@ -17,6 +17,28 @@ def test_valid_flat_rate_plan(flat_rate_plan_dict):
     assert len(plan.usage_tiers) == 1
 
 
+def test_optional_fields_default_when_omitted(flat_rate_plan_dict):
+    """last_updated / conditions / valid_from are optional with sane defaults."""
+    plan = ElectricityPlan.model_validate(flat_rate_plan_dict)
+    assert plan.last_updated is None
+    assert plan.conditions == []
+    assert plan.valid_from is None
+
+
+def test_last_updated_and_conditions_round_trip():
+    plan = ElectricityPlan.model_validate(
+        {
+            "plan_id": "x", "retailer": "R", "plan_name": "P",
+            "daily_supply_charge": "1.0",
+            "last_updated": "2026-07-14T11:30:00+10:00",
+            "conditions": ["Direct debit required", "Pay-on-time discount included"],
+            "usage_tiers": [{"name": "Flat", "rate": "0.30", "schedule": []}],
+        }
+    )
+    assert plan.last_updated == "2026-07-14T11:30:00+10:00"
+    assert plan.conditions == ["Direct debit required", "Pay-on-time discount included"]
+
+
 def test_valid_tou_plan(tou_plan_dict):
     plan = ElectricityPlan.model_validate(tou_plan_dict)
     assert len(plan.usage_tiers) == 2

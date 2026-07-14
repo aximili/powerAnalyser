@@ -184,7 +184,7 @@ class ResultsView(ctk.CTkFrame):
             writer.writerow([
                 "Rank", "Plan ID", "Retailer", "Plan Name",
                 "Supply $", "Usage $", "Solar Credit $", "Net $", "$/day",
-                "Simulated Net $", "Shift Saving $",
+                "Simulated Net $", "Shift Saving $", "Last Updated", "Conditions",
             ])
             for rank, e in enumerate(self._result.ranked, start=1):
                 daily = e.baseline_net / days
@@ -197,4 +197,6 @@ class ResultsView(ctk.CTkFrame):
                     f"{float(daily):.4f}",
                     f"{e.simulated_net:.4f}" if e.simulated_net is not None else "",
                     f"{e.shift_saving:.4f}" if e.shift_saving is not None else "",
+                    e.last_updated or "",
+                    "; ".join(e.conditions),
                 ])

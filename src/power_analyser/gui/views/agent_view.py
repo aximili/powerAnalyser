@@ -1,64 +1,51 @@
-"""Tab 2 — Agent: configure LLM provider, target URL, start/stop, CAPTCHA handling."""
+"""Tab — Agent: configure LLM provider, target URL, start/stop, CAPTCHA handling.
+
+The LLM configuration (provider / model / API key) is shared with the Manual
+tab via a single set of tkinter ``StringVar`` objects passed in from the app.
+"""
 
 from __future__ import annotations
 
 import threading
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import customtkinter as ctk
 
-from power_analyser.config import Config, get_config
 from power_analyser.core.tariff.schema import ElectricityPlan
+
+from ..widgets.llm_config_frame import LLMConfigFrame, default_llm_vars
 
 
 class AgentView(ctk.CTkFrame):
-    """Tab 2 — LLM config, target URL, run/stop, live log, CAPTCHA banner."""
+    """Tab — LLM config, target URL, run/stop, live log, CAPTCHA banner."""
 
     def __init__(
         self,
         parent,
         on_plans_found: Callable[[list[ElectricityPlan]], None],
+        settings: Optional[dict[str, Any]] = None,
+        llm_vars: Optional[dict[str, ctk.StringVar]] = None,
         **kwargs,
     ) -> None:
         super().__init__(parent, **kwargs)
         self._on_plans_found = on_plans_found
+        self._settings = settings or {}
+        self._llm_vars = llm_vars if llm_vars is not None else default_llm_vars()
         self._orchestrator = None
         self._agent_thread: Optional[threading.Thread] = None
         self._running = False
 
         self._build_ui()
+        self._apply_settings()
 
     # ── Layout ─────────────────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
 
-        # ── LLM provider config ──
-        llm_frame = ctk.CTkFrame(self)
-        llm_frame.grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
-        llm_frame.columnconfigure((1, 3), weight=1)
-
-        ctk.CTkLabel(llm_frame, text="LLM Configuration", font=ctk.CTkFont(size=13, weight="bold")).grid(
-            row=0, column=0, columnspan=4, padx=8, pady=(8, 4), sticky="w"
-        )
-
-        ctk.CTkLabel(llm_frame, text="Provider:").grid(row=1, column=0, padx=8, pady=4, sticky="w")
-        self._provider_var = ctk.StringVar(value="ollama")
-        provider_menu = ctk.CTkOptionMenu(
-            llm_frame,
-            variable=self._provider_var,
-            values=["ollama", "glm", "openai"],
-            command=self._on_provider_change,
-        )
-        provider_menu.grid(row=1, column=1, padx=8, pady=4, sticky="ew")
-
-        ctk.CTkLabel(llm_frame, text="Model:").grid(row=1, column=2, padx=8, pady=4, sticky="w")
-        self._model_entry = ctk.CTkEntry(llm_frame, placeholder_text="e.g. llama3.2")
-        self._model_entry.grid(row=1, column=3, padx=8, pady=4, sticky="ew")
-
-        ctk.CTkLabel(llm_frame, text="API Key / Base URL:").grid(row=2, column=0, padx=8, pady=4, sticky="w")
-        self._api_key_entry = ctk.CTkEntry(llm_frame, placeholder_text="API key or base URL", show="")
-        self._api_key_entry.grid(row=2, column=1, columnspan=3, padx=8, pady=4, sticky="ew")
+        # ── Shared LLM provider config ──
+        self._llm_config = LLMConfigFrame(self, shared_vars=self._llm_vars)
+        self._llm_config.grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
 
         # ── Task / URL ──
         url_frame = ctk.CTkFrame(self)
@@ -88,6 +75,13 @@ class AgentView(ctk.CTkFrame):
         )
         self._stop_btn.pack(side="left")
 
+        # Helpful note about the manual flow / visual browser
+        ctk.CTkLabel(
+            ctrl_frame,
+            text="Tip: with a visible browser you can finish the form yourself; the agent reads the result.",
+            text_color="gray60",
+        ).pack(side="left", padx=(16, 0))
+
         # ── CAPTCHA banner (hidden by default) ──
         self._captcha_frame = ctk.CTkFrame(self, fg_color="#8B4513")
         # Not gridded until a CAPTCHA is detected
@@ -113,15 +107,23 @@ class AgentView(ctk.CTkFrame):
         self._log_box.grid(row=5, column=0, padx=16, pady=(4, 16), sticky="nsew")
         self.rowconfigure(5, weight=1)
 
-    # ── Provider change ────────────────────────────────────────────────────────
+    # ── Settings persistence ───────────────────────────────────────────────────
 
-    def _on_provider_change(self, value: str) -> None:
-        placeholders = {
-            "ollama": "http://localhost:11434",
-            "glm": "Zhipu AI API key",
-            "openai": "OpenAI API key (or leave blank for env var)",
-        }
-        self._api_key_entry.configure(placeholder_text=placeholders.get(value, ""))
+    def _apply_settings(self) -> None:
+        """Restore LLM config, target URL and task prompt from last session."""
+        self._llm_config.apply_settings(self._settings)
+        url = self._settings.get("target_url", "")
+        if url:
+            self._url_entry.insert(0, url)
+        task = self._settings.get("task_prompt", "")
+        if task:
+            self._task_entry.insert(0, task)
+
+    def collect_state(self, settings: dict[str, Any]) -> None:
+        """Write the current LLM config / task prompt into *settings*."""
+        self._llm_config.collect_state(settings)
+        settings["target_url"] = self._url_entry.get().strip()
+        settings["task_prompt"] = self._task_entry.get().strip()
 
     # ── Agent lifecycle ────────────────────────────────────────────────────────
 
@@ -136,7 +138,7 @@ class AgentView(ctk.CTkFrame):
         )
 
         try:
-            config = self._build_config()
+            config = self._llm_config.build_config()
         except Exception as exc:
             self._log(f"ERROR building config: {exc}")
             return
@@ -177,10 +179,9 @@ class AgentView(ctk.CTkFrame):
 
     def _stop_agent(self) -> None:
         self._running = False
-        self._log("Stop requested. Agent will finish current action then halt.")
-        # The orchestrator doesn't have an external stop flag yet; the thread
-        # will complete its current iteration and exit naturally because
-        # max_iterations is finite.
+        if self._orchestrator:
+            self._orchestrator.request_stop()
+        self._log("Stop requested. Agent will halt after its current action.")
         self._start_btn.configure(state="normal")
         self._stop_btn.configure(state="disabled")
 
@@ -212,32 +213,6 @@ class AgentView(ctk.CTkFrame):
         if self._orchestrator:
             self._orchestrator.signal_captcha_solved()
         self._log("CAPTCHA marked as solved. Resuming…")
-
-    # ── Config builder ─────────────────────────────────────────────────────────
-
-    def _build_config(self) -> Config:
-        """Build a Config from the GUI fields, overriding env defaults."""
-        base = get_config()
-        provider = self._provider_var.get()
-        model = self._model_entry.get().strip()
-        api_key_or_url = self._api_key_entry.get().strip()
-
-        import os
-        if api_key_or_url:
-            if provider == "ollama":
-                os.environ["OLLAMA_BASE_URL"] = api_key_or_url
-            elif provider == "glm":
-                os.environ["GLM_API_KEY"] = api_key_or_url
-            elif provider == "openai":
-                os.environ["OPENAI_API_KEY"] = api_key_or_url
-        if model:
-            os.environ["LLM_MODEL"] = model
-        os.environ["LLM_PROVIDER"] = provider
-
-        # Re-read so the singleton picks up the overrides
-        from power_analyser import config as cfg_module
-        cfg_module._config = None  # reset singleton
-        return get_config()
 
     # ── Log helper ─────────────────────────────────────────────────────────────
 
