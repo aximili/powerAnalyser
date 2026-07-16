@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from power_analyser.core.tariff.schema import ElectricityPlan
-from power_analyser.core.tariff.loader import load_plan, load_plans_dir
+from power_analyser.core.tariff.loader import load_plan, load_plans_dir, save_plan
 
 from .conftest import PLANS_DIR, flat_rate_plan_dict, tou_plan_dict
 
@@ -112,3 +112,61 @@ def test_smart_rate_plan_has_free_window():
     assert len(smart.free_windows) == 1
     assert smart.free_windows[0].name == "Midday Power Saver"
     assert smart.free_windows[0].fair_use_cap_kwh == 2.0
+
+
+# ── save_plan upsert (data/plans persistence) ─────────────────────────────────
+
+
+def test_save_plan_writes_json_that_round_trips(tmp_path, flat_rate_plan_dict):
+    """A saved plan reloads to an equal ElectricityPlan."""
+    plan = ElectricityPlan.model_validate(flat_rate_plan_dict)
+    path = save_plan(plan, directory=tmp_path)
+
+    assert path.exists()
+    assert path.name == f"{plan.plan_id}.json"
+    reloaded = load_plan(path)
+    assert reloaded.plan_id == plan.plan_id
+    assert reloaded.retailer == plan.retailer
+    assert reloaded.daily_supply_charge == plan.daily_supply_charge
+
+
+def test_save_plan_upserts_by_plan_id(tmp_path, flat_rate_plan_dict):
+    """Saving with the same plan_id overwrites the existing file."""
+    plan = ElectricityPlan.model_validate(flat_rate_plan_dict)
+    save_plan(plan, directory=tmp_path)
+
+    # Change the rate and re-save with the same plan_id.
+    from decimal import Decimal
+    modified = plan.model_copy(update={"daily_supply_charge": Decimal("2.50")})
+    path = save_plan(modified, directory=tmp_path)
+
+    files = list(tmp_path.glob("*.json"))
+    assert len(files) == 1  # still exactly one file — overwritten, not duplicated
+    reloaded = load_plan(path)
+    assert reloaded.daily_supply_charge == Decimal("2.50")
+
+
+def test_save_plan_preserves_decimal_as_string(tmp_path, flat_rate_plan_dict):
+    """Decimal fields must be written as JSON strings to preserve precision."""
+    plan = ElectricityPlan.model_validate(flat_rate_plan_dict)
+    path = save_plan(plan, directory=tmp_path)
+    raw = path.read_text(encoding="utf-8")
+    # Decimal fields are rendered as quoted JSON strings, matching the
+    # hand-authored sample files in data/plans/.
+    assert '"daily_supply_charge": "1.00"' in raw
+    assert '"rate": "0.30"' in raw
+
+
+def test_save_plan_defaults_to_configured_data_dir(tmp_path, monkeypatch, flat_rate_plan_dict):
+    """With no directory given, save_plan writes to <data_dir>/plans/."""
+    from power_analyser import config as cfg_module
+
+    fake_config = cfg_module.Config()
+    fake_config.data_dir = tmp_path
+    monkeypatch.setattr(cfg_module, "get_config", lambda: fake_config)
+
+    plan = ElectricityPlan.model_validate(flat_rate_plan_dict)
+    path = save_plan(plan)
+
+    assert path == tmp_path / "plans" / f"{plan.plan_id}.json"
+    assert path.exists()

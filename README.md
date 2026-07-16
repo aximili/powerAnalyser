@@ -11,11 +11,12 @@ An optional AI agent (Part 2) can autonomously browse retailer websites and extr
 ## Features
 
 - **NEM12 parsing** — handles variable-length DST days (46 or 50 intervals), E1 consumption and B1 solar export
+- **Analysis period selection + multi-year averaging** — analyse **All available** data or a **Custom** day/month window (with year-end wrap-around, e.g. 1/12–28/2). When your file spans multiple years, matching calendar days are averaged so a seasonal pick uses every year. Period total + $/day; no forced annualization.
 - **Tariff types** — flat rate, time-of-use, 3-part "smart rate", free midday windows (with fair-use caps), solar feed-in, step tariffs
 - **Load-shift simulation** — move EV charging / pool pump into free or cheap windows; see how much you save
 - **Ranked comparison** — plans sorted by net annual cost with per-plan supply / usage / solar breakdown
 - **AI browser agent** — navigates retailer websites, fills suburb/usage forms, extracts plan pricing (supports Ollama, GLM/Zhipu AI, OpenAI-compatible APIs); with screenshot fallback + a self-repair extraction pass for smaller local models
-- **Manual rate extract** — paste a screenshot or upload a PDF of a retailer's rate page (with provider/plan name) and extract the plan straight into the comparison
+- **Manual rate extract** — paste a screenshot or upload a PDF of a retailer's rate page and extract the plan straight into the comparison. If you leave the provider/plan name blank, the model reads them off the page for you to confirm; extracted plans are saved to `data/plans/` automatically.
 - **Desktop GUI** — CustomTkinter cross-platform app (Windows + Mac) with embedded matplotlib charts
 
 ---
@@ -74,9 +75,9 @@ Three tabs:
 
 | Tab | Purpose |
 |---|---|
-| **Analyse** | Load NEM12 file, add plan JSONs, configure load-shift, run comparison |
+| **Analyse** | Load NEM12 file (parsed in the background as soon as picked), pick an **Analysis Period** (All available or a Custom day/month window; multi-year files prompt you to average or pick a year), add plan JSONs, configure load-shift, run comparison |
 | **Agent** | Set LLM provider and target URL; agent browses and extracts plans automatically |
-| **Manual** | Paste/upload a rate-page screenshot or PDF (+ provider/plan name) and extract a plan without the browser |
+| **Manual** | Paste/upload a rate-page screenshot or PDF; extract a plan without the browser (provider/plan name can be inferred from the page; plans auto-save to `data/plans/`) |
 | **Results** | Ranked table, cost breakdown bar chart, load-shift delta report, CSV export |
 
 ### CLI smoke-test (no GUI)
@@ -86,6 +87,40 @@ python -m power_analyser.core.comparison.report \
   --nem12 data/sample_nem12.csv \
   --plans-dir data/plans/
 ```
+
+Optional period flags keep the headless path feature-complete with the GUI:
+
+```bash
+# Analyse only a day/month window (year ignored); matching months across
+# years are averaged by default.
+python -m power_analyser.core.comparison.report \
+  --nem12 data/sample_nem12.csv --plans-dir data/plans/ \
+  --from 1/10 --to 31/10 --year all
+```
+
+- `--from`/`--to` take `dd/mm` (or `dd/mm/yyyy`; the year is ignored).
+- `--year all` (default) averages matching calendar days across every year in
+  the file. `--year 2025` restricts to a single year.
+
+### Analysis Period & multi-year averaging
+
+On the **Analyse** tab, picking a NEM12 file parses it in the background and
+shows the **Available period** (`dd/mm/yyyy–dd/mm/yyyy`). Choose:
+
+- **All available** — analyse the whole file. A multi-year file collapses into
+  one representative ~1-year period (matching calendar days averaged).
+- **Custom** — enter a **From** / **To** day/month window. Wrap-around is
+  allowed (`From` > `To` crosses year-end, e.g. `1/12`–`28/2` = summer).
+
+When a custom window exists in **2+ years**, a popup offers **Both (averaged)**
+(default) or a single year. Out-of-range windows offer to clamp (Yes/No); a
+window with no overlap at all is a hard error.
+
+> **Known limitation.** Averaging is done at the kWh level ("average then
+> cost"). Because weekdays differ across years for the same calendar date,
+> weekday-specific ToU / free-window plans are *slightly smoothed* under
+> multi-year averaging. Flat, step, and 7-day-free-window plans are exact.
+> Reporting shows the **period total + $/day** (no forced annualization).
 
 ---
 
@@ -125,10 +160,10 @@ Key rules (full detail in [`docs/plan-schema.md`](docs/plan-schema.md)):
 python -m pytest tests/ -v
 ```
 
-The test suite (68 tests) runs fully offline — no API keys, no real browser.
+The test suite runs fully offline — no API keys, no real browser.
 
 ```
-tests/core/     — NEM12 parsing, ingestion, tariff schema, cost calculator, elasticity
+tests/core/     — NEM12 parsing, ingestion, tariff schema, cost calculator, elasticity, period selection
 tests/agent/    — plan extractor + orchestrator loop (mock/scripted LLM provider, no browser)
 ```
 
@@ -142,6 +177,7 @@ src/power_analyser/
   core/
     nem12/                   # NEM12 parser (models + parser)
     ingestion/pipeline.py    # NEM12 → pandas DataFrame (DST-aware)
+    ingestion/period.py      # Period selection + multi-year averaging
     tariff/                  # Pydantic plan schema + JSON loader
     simulation/
       elasticity.py          # Load-shift simulator
@@ -183,10 +219,11 @@ Copy `.env.example` to `.env` and fill in as needed:
 | `AGENT_HEADLESS` | `false` | Run browser headlessly (set `true` for CI) |
 | `DATA_DIR` | `data` | Default directory for NEM12 files and plans |
 
-> GUI field values (NEM12 path, LLM provider/model/key, target URL, task
-> prompt) are cached in a project-root `.gui_settings.json` so they're
-> remembered across restarts. LLM fields also fall back to your `.env` on first
-> run. Both files are gitignored — don't commit real keys.---
+> GUI field values (NEM12 path, analysis-period mode/window, LLM
+> provider/model/key, target URL, task prompt) are cached in a project-root
+> `.gui_settings.json` so they're remembered across restarts. LLM fields also
+> fall back to your `.env` on first run. Both files are gitignored — don't
+> commit real keys.---
 
 ## Victorian tariff notes
 

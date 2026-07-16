@@ -13,6 +13,7 @@ from power_analyser.agent.extractors.plan_extractor import (
     PlanExtractor,
     _apply_context,
     _extract_json_from_response,
+    _parse_identity_response,
     _snake_case,
 )
 from power_analyser.core.tariff.schema import ElectricityPlan
@@ -282,4 +283,71 @@ def test_conditions_from_llm_response_are_preserved():
     plan = extractor.extract_from_text("page")[0]
 
     assert plan.conditions == ["Direct debit required", "Pay-on-time discount included"]
+
+
+# ── Identity inference (Manual tab pre-fill flow) ──────────────────────────────
+
+
+def test_infer_identity_returns_retailer_and_plan_name():
+    """The focused identity prompt should yield (retailer, plan_name)."""
+    from .conftest import ScriptedLLMProvider
+
+    provider = ScriptedLLMProvider(
+        responses=['{"retailer": "Amber Electric", "plan_name": "Smart Plan"}']
+    )
+    extractor = PlanExtractor(provider)
+    retailer, plan_name = extractor.infer_identity_from_screenshot(b"\x89PNG fake")
+
+    assert retailer == "Amber Electric"
+    assert plan_name == "Smart Plan"
+    assert provider.image_calls == 1  # uses the vision path
+    assert provider.text_calls == 0
+
+
+def test_infer_identity_embeds_page_text():
+    """PDF text is embedded so text-only models can identify the retailer."""
+    provider = MockLLMProvider(
+        response='{"retailer": "Origin", "plan_name": ""}'
+    )
+    extractor = PlanExtractor(provider)
+    extractor.infer_identity_from_screenshot(
+        b"\x89PNG fake", page_text="Origin Energy — Basic Plan"
+    )
+
+    assert "Origin Energy — Basic Plan" in (provider.last_prompt or "")
+
+
+def test_infer_identity_handles_empty_plan_name():
+    provider = MockLLMProvider(response='{"retailer": "Red Energy", "plan_name": ""}')
+    extractor = PlanExtractor(provider)
+    retailer, plan_name = extractor.infer_identity_from_screenshot(b"\x89PNG fake")
+    assert retailer == "Red Energy"
+    assert plan_name == ""
+
+
+def test_infer_identity_returns_empty_on_unparseable_response():
+    provider = MockLLMProvider(response="I cannot read this image.")
+    extractor = PlanExtractor(provider)
+    retailer, plan_name = extractor.infer_identity_from_screenshot(b"\x89PNG fake")
+    assert retailer == ""
+    assert plan_name == ""
+
+
+def test_infer_identity_strips_markdown_fences():
+    provider = MockLLMProvider(
+        response='```json\n{"retailer": "AGL", "plan_name": "Residential"}\n```'
+    )
+    extractor = PlanExtractor(provider)
+    retailer, plan_name = extractor.infer_identity_from_screenshot(b"\x89PNG fake")
+    assert retailer == "AGL"
+    assert plan_name == "Residential"
+
+
+def test_parse_identity_response_helper():
+    assert _parse_identity_response('{"retailer": "X", "plan_name": "Y"}') == ("X", "Y")
+    # Missing keys default to empty strings.
+    assert _parse_identity_response('{"retailer": "X"}') == ("X", "")
+    # Non-JSON returns empties.
+    assert _parse_identity_response("nope") == ("", "")
+    assert _parse_identity_response("") == ("", "")
 

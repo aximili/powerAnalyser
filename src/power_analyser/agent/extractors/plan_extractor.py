@@ -119,6 +119,19 @@ RULES:
 - "conditions": capture any eligibility/discount requirements for these rates (e.g. ["Direct debit required"]). Use [] if none are shown.
 - Output ONLY the JSON object. No prose, no markdown fences."""
 
+_IDENTITY_PROMPT = """You are identifying ONE Australian electricity retailer and its plan name from a screenshot or PDF of a rate sheet.
+
+An image of the document is attached.
+
+Look at logos, page headings, footers and any branding to determine:
+- "retailer": the electricity company name (e.g. "Amber", "Origin Energy", "Red Energy"). This is REQUIRED.
+- "plan_name": the specific plan's display name (e.g. "Smart Plan", "Basic Saver"). Use "" if you cannot tell.
+
+Return ONLY a compact JSON object with exactly these keys:
+{"retailer": "...", "plan_name": "..."}
+
+No prose, no markdown fences, no array."""
+
 
 class PlanExtractor:
     """Extracts ``ElectricityPlan`` objects from page content using an LLM."""
@@ -208,6 +221,34 @@ class PlanExtractor:
 
         plans = self._finalize(response)
         return [_apply_context(p, retailer, plan_name) for p in plans]
+
+    def infer_identity_from_screenshot(
+        self, screenshot_bytes: bytes, page_text: str = ""
+    ) -> tuple[str, str]:
+        """Ask the LLM to read just the retailer and plan name from a rate sheet.
+
+        Returns ``(retailer, plan_name)`` — ``retailer`` is empty only when the
+        model genuinely could not determine it. Used by the Manual tab to
+        pre-fill the identity fields (so the user only has to confirm them)
+        before the full extraction runs.
+
+        ``page_text`` (e.g. text lifted from an uploaded PDF) is embedded in the
+        prompt when supplied, so text-only models can answer without the image.
+        """
+        prompt = _IDENTITY_PROMPT
+        body = (page_text or "").strip()
+        if body:
+            prompt += (
+                "\n\nTEXT CONTENT EXTRACTED FROM THE DOCUMENT "
+                "(use this to identify the retailer and plan):\n"
+                + body[:_MAX_CONTENT_CHARS]
+            )
+        try:
+            response = self._provider.complete_with_image(prompt, screenshot_bytes)
+        except Exception as exc:
+            logger.warning("LLM identity inference failed: %s", exc)
+            return "", ""
+        return _parse_identity_response(response)
 
     # ── Parsing + repair ───────────────────────────────────────────────────────
 
@@ -360,6 +401,25 @@ def _apply_context(
     if changed:
         plan.plan_id = _snake_case(f"{plan.retailer} {plan.plan_name}".strip())
     return plan
+
+
+def _parse_identity_response(text: str) -> tuple[str, str]:
+    """Parse an identity-inference response into ``(retailer, plan_name)``.
+
+    Tolerates markdown fences and extra prose. Missing keys default to "".
+    """
+    raw = _extract_json_from_response(text)
+    if not raw:
+        return "", ""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return "", ""
+    if not isinstance(data, dict):
+        return "", ""
+    retailer = str(data.get("retailer", "")).strip()
+    plan_name = str(data.get("plan_name", "")).strip()
+    return retailer, plan_name
 
 
 def _snake_case(text: str) -> str:

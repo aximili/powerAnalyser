@@ -1,0 +1,117 @@
+{
+  "plan_id": "globird_zerohero",
+  "retailer": "GloBird Energy",
+  "plan_name": "GloBird ZEROHERO Residential (Flexible Rate) United Energy",
+  "daily_supply_charge": "1.4080",
+  "usage_tiers": [
+    {
+      "name": "4pm-11pm",
+      "rate": "0.3960",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "16:00",
+          "end": "23:00"
+        }
+      ]
+    },
+    {
+      "name": "12pm-3pm First 50kWh",
+      "rate": "0.0000",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "12:00",
+          "end": "15:00"
+        }
+      ]
+    },
+    {
+      "name": "12pm-3pm Remaining",
+      "rate": "0.2530",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "12:00",
+          "end": "15:00"
+        }
+      ]
+    },
+    {
+      "name": "3pm-4pm; 11pm-12pm",
+      "rate": "0.3190",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "15:00",
+          "end": "16:00"
+        },
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "23:00",
+          "end": "12:00"
+        }
+      ]
+    }
+  ],
+  "free_windows": [
+    {
+      "name": "Perfect if you love free stuff",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "12:00",
+          "end": "15:00"
+        }
+      ],
+      "fair_use_cap_kwh": 50,
+      "overflow_tier": "12pm-3pm Remaining"
+    }
+  ],
+  "fit_tiers": [
+    {
+      "name": "Retailer feed-in tariff",
+      "rate": "0.0000",
+      "schedule": []
+    },
+    {
+      "name": "Peak solar feed-in",
+      "rate": "0.0200",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "16:00",
+          "end": "23:00"
+        }
+      ]
+    },
+    {
+      "name": "Super Export Credit",
+      "rate": "0.1000",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "18:00",
+          "end": "21:00"
+        }
+      ]
+    },
+    {
+      "name": "Critical Peak-Export Credit",
+      "rate": "1.0000",
+      "schedule": []
+    }
+  ],
+  "conditions": [
+    "You must have installed an eligible battery and solar-PV.",
+    "You must have an eligible smart meter.",
+    "This offer is for VIC residential customers who have a Qualifying System and must meet and remain compliant with the Eligibility Criteria and all other requirements of the Virtual Power Plant Terms and Conditions."
+  ],
+  "step_tariffs": [
+    {
+      "threshold_kwh_per_day": 50,
+      "tier_below": "12pm-3pm First 50kWh",
+      "tier_above": "12pm-3pm Remaining"
+    }
+  ]
+}

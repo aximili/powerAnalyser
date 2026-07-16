@@ -64,3 +64,24 @@ def test_settings_path_is_in_project_root() -> None:
     path = s.settings_path()
     assert path.name == ".gui_settings.json"
     assert (path.parent / "pyproject.toml").exists()
+
+
+def test_period_keys_in_defaults_and_round_trip(isolated_settings: Path) -> None:
+    """The three analysis-period keys must exist in DEFAULTS and round-trip."""
+    for key in ("period_mode", "period_from", "period_to"):
+        assert key in s.DEFAULTS
+    assert s.DEFAULTS["period_mode"] == "all"
+    assert s.DEFAULTS["period_from"] == ""
+    assert s.DEFAULTS["period_to"] == ""
+
+    payload = {
+        "period_mode": "custom",
+        "period_from": "1/6",
+        "period_to": "31/8",
+    }
+    s.save_settings(payload)
+    loaded = s.load_settings()
+    assert loaded["period_mode"] == "custom"
+    assert loaded["period_from"] == "1/6"
+    assert loaded["period_to"] == "31/8"
+

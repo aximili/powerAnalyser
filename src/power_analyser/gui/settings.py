@@ -26,6 +26,10 @@ _LEGACY_SETTINGS_FILE = "gui_settings.json"
 DEFAULTS: dict[str, Any] = {
     # Analyse tab
     "nem12_path": "",
+    # Analyse tab — analysis period selection (dd/mm strings, loose)
+    "period_mode": "all",      # "all" | "custom"
+    "period_from": "",          # dd/mm or dd/mm/yyyy (year ignored)
+    "period_to": "",
     # Agent / Manual tabs (shared LLM config)
     "llm_provider": "ollama",
     "llm_model": "",

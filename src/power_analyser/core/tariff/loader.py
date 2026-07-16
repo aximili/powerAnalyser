@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Optional
 
 from pydantic import ValidationError
 
@@ -19,6 +20,28 @@ def load_plan(path: Path) -> ElectricityPlan:
     with open(path, encoding="utf-8") as fh:
         raw = json.load(fh)
     return ElectricityPlan.model_validate(raw)
+
+
+def save_plan(plan: ElectricityPlan, directory: Optional[Path] = None) -> Path:
+    """Upsert *plan* to ``directory/{plan_id}.json``.
+
+    Writing a plan whose ``plan_id`` matches an existing file overwrites it
+    (an upsert keyed on ``plan_id``). The directory is created if missing.
+    Returns the path that was written.
+
+    ``directory`` defaults to ``<data_dir>/plans`` (see :class:`Config`), which
+    is where the comparison engine and the Analyse tab look for plans.
+    """
+    if directory is None:
+        from power_analyser.config import get_config
+
+        directory = get_config().data_dir / "plans"
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{plan.plan_id}.json"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(plan.model_dump_json(indent=2))
+    return path
 
 
 def load_plans_dir(directory: Path) -> list[ElectricityPlan]:

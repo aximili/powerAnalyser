@@ -67,3 +67,97 @@ def test_kwh_values_are_non_negative(meter):
 
 def test_nmi_is_populated(meter):
     assert meter.nmi == "6123456789"
+
+
+# ── Empty-stream index type (regression for "'RangeIndex' has no attribute date") ──
+
+
+def test_empty_stream_has_datetime_index(tmp_path):
+    """A 200 record with no interval data must still yield a tz-aware DatetimeIndex.
+
+    Previously the empty fallback used a plain RangeIndex, so any ``.index.date``
+    access (e.g. in the GUI's file-load callback, or report/calculator/period)
+    crashed with ``'RangeIndex' object has no attribute 'date'``.
+    """
+    csv = (
+        "100,NEM12,6408088506\n"
+        "200,6408088506,B1E1,E1,E1,,1217287,KWH,30,\n"
+        "900\n"
+    )
+    path = tmp_path / "empty_stream.csv"
+    path.write_text(csv, encoding="utf-8")
+
+    from power_analyser.core.ingestion.pipeline import MeterDataSet  # noqa: F401
+
+    import pandas as pd
+
+    # The E1 200 record exists but has no 300 data -> e1 is empty but must be a DatetimeIndex.
+    # (load() doesn't raise because e1_records is non-empty.)
+    meter_data = IngestionPipeline().load(path)
+    assert isinstance(meter_data.e1.index, pd.DatetimeIndex)
+    assert str(meter_data.e1.index.tz) == MELBOURNE_TZ
+    # The attribute access that previously crashed must now succeed:
+    assert list(meter_data.e1.index.date) == []
+
+
+def test_no_solar_stream_b1_is_datetime_index(meter):
+    """Even when B1 is empty, its index must be a DatetimeIndex (no RangeIndex footgun)."""
+    import pandas as pd
+
+    # Build a meter with an explicitly-empty B1 via the pipeline helper:
+    from power_analyser.core.ingestion.pipeline import _empty_kwh_frame
+
+    empty_b1 = _empty_kwh_frame()
+    assert isinstance(empty_b1.index, pd.DatetimeIndex)
+    assert hasattr(empty_b1.index, "date")
+    assert str(empty_b1.index.tz) == MELBOURNE_TZ
+
+
+# ── Fall-back DST day (April, 50 intervals) — regression for mixed-tz concat crash ──
+
+
+def test_fall_back_dst_day_parses_without_mixed_tz(tmp_path):
+    """A file containing the April fall-back day (50 intervals) must parse cleanly.
+
+    Regression: ``tz_localize(ambiguous="infer")`` used to raise on the isolated
+    fall-back day, silently fall back to UTC, and the subsequent mixed-tz
+    ``pd.concat`` produced an object ``Index`` (not ``DatetimeIndex``) — crashing
+    every ``.index.date`` access with ``'Index' object has no attribute 'date'``
+    on any file spanning a full year.
+    """
+    import datetime as _dt
+
+    import pandas as pd
+
+    def line300(datestr, n):
+        return "300," + datestr + "," + ",".join("0.1" for _ in range(n)) + ",A,,,"
+
+    csv = "\n".join(
+        [
+            "100,NEM12,6408088506",
+            "200,6408088506,B1E1,E1,E1,,1217287,KWH,30,",
+            line300("20240405", 48),   # normal
+            line300("20240407", 50),   # FALL-BACK (AEDT → AEST)
+            line300("20241006", 46),   # SPRING-FORWARD (AEST → AEDT)
+            "900",
+        ]
+    ) + "\n"
+    path = tmp_path / "dst_year.csv"
+    path.write_text(csv, encoding="utf-8")
+
+    meter_data = IngestionPipeline().load(path)
+
+    # The whole-period index must stay a tz-aware DatetimeIndex (no UTC fallback,
+    # no object Index from a mixed-tz concat).
+    assert isinstance(meter_data.e1.index, pd.DatetimeIndex)
+    assert str(meter_data.e1.index.tz) == MELBOURNE_TZ
+
+    # The fall-back day is present with a full 48-slot row set.
+    fb = _dt.date(2024, 4, 7)
+    assert fb in set(meter_data.e1.index.date)
+    assert len(meter_data.e1[meter_data.e1.index.date == fb]) == 48
+
+    # .index.date must not raise (the original symptom).
+    assert isinstance(list(meter_data.e1.index.date), list)
+
+

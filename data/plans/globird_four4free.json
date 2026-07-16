@@ -1,0 +1,101 @@
+{
+  "plan_id": "globird_four4free",
+  "retailer": "GloBird Energy",
+  "plan_name": "GloBird FOUR4FREE Residential (Two Rate)",
+  "daily_supply_charge": "1.0780",
+  "usage_tiers": [
+    {
+      "name": "3pm-11am First 15kWh",
+      "rate": "0.3740",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "15:00",
+          "end": "11:00"
+        }
+      ]
+    },
+    {
+      "name": "3pm-11am Remaining",
+      "rate": "0.3850",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "15:00",
+          "end": "11:00"
+        }
+      ]
+    },
+    {
+      "name": "11am-3pm First 50kWh",
+      "rate": "0.0000",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "11:00",
+          "end": "15:00"
+        }
+      ]
+    },
+    {
+      "name": "11am-3pm Remaining",
+      "rate": "0.2200",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "11:00",
+          "end": "15:00"
+        }
+      ]
+    }
+  ],
+  "free_windows": [
+    {
+      "name": "Four-hour free usage every day",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "11:00",
+          "end": "15:00"
+        }
+      ],
+      "fair_use_cap_kwh": 50.0,
+      "overflow_tier": "11am-3pm Remaining"
+    }
+  ],
+  "fit_tiers": [
+    {
+      "name": "Retailer feed-in tariff",
+      "rate": "0.0000",
+      "schedule": []
+    },
+    {
+      "name": "Peak solar feed-in",
+      "rate": "0.0300",
+      "schedule": [
+        {
+          "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          "start": "16:00",
+          "end": "23:00"
+        }
+      ]
+    }
+  ],
+  "conditions": [
+    "This plan is available to residential customers with an eligible electricity smart meter.",
+    "Prompt Payment Discount: 2% when you pay the bill by the due date.",
+    "Direct Debit Discount: Further 1% when you pay the bill by the due date with direct debit."
+  ],
+  "step_tariffs": [
+    {
+      "threshold_kwh_per_day": 15.0,
+      "tier_below": "3pm-11am First 15kWh",
+      "tier_above": "3pm-11am Remaining"
+    },
+    {
+      "threshold_kwh_per_day": 50.0,
+      "tier_below": "11am-3pm First 50kWh",
+      "tier_above": "11am-3pm Remaining"
+    }
+  ]
+}

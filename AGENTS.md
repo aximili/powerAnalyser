@@ -189,7 +189,8 @@ When you already have the rates on screen (or in a PDF), skip the autonomous
 browser and extract a plan straight from a screenshot or PDF:
 
 1. Open the **Manual** tab (LLM config is shared with the Agent tab)
-2. Enter the **provider (retailer) name** (required) and optionally the **plan name**
+2. Enter the **provider (retailer) name** and optionally the **plan name**,
+   or leave them blank to have the model pre-fill them (see below)
 3. **Paste** a screenshot of the rates (`Ctrl+V` / `Cmd+V`), click **Browse…**,
    or drag & drop an image **or PDF** file
 4. Click **Extract Plan**
@@ -199,11 +200,28 @@ retailer (and optionally plan name) are supplied, smaller local models only
 need to read the rates — which is far more reliable than identifying the brand
 from the image. Extracted plans flow into the **Analyse** tab automatically.
 
+**Two-phase identity pre-fill.** If the provider name is empty when you click
+**Extract Plan**, the app runs a lightweight identity-inference call
+(`PlanExtractor.infer_identity_from_screenshot`) that reads just the retailer
+and plan name off the rate page, pre-fills the two fields, and asks you to
+confirm. The full rate extraction runs on the *second* click, once the provider
+name is populated. This keeps small models honest: they confirm identity first,
+then read the rates.
+
+**Persistence.** Each extracted plan is upserted to
+`data/plans/{plan_id}.json` via `save_plan` in
+`core/tariff/loader.py` (keyed on `plan_id`, so re-extracting a plan updates
+the same file). The saved path is reported in the result box. This is the same
+directory the **Analyse** tab and the comparison engine load plans from, so an
+extracted plan sticks around across restarts and is picked up by "Add Folder…".
+
 **PDFs** (`.pdf`) are rendered with PyMuPDF (`agent/extractors/pdf_utils.py`):
 the pages are stitched into one image (fed to a vision model) and their text is
 extracted and embedded in the prompt (so text-only models and selectable-text
 rate sheets work too). PDFs are accepted via **Browse…** and drag & drop (not
-clipboard paste). If PyMuPDF is missing, a clear error is shown.
+clipboard paste). If PyMuPDF is missing, a clear error is shown. The preview
+panel is height-bounded so a large multi-page PDF never hides the **Extract
+Plan** button.
 
 ---
 
@@ -218,11 +236,87 @@ python -m pytest tests/ -v
 - `tests/agent/` — plan extraction (`MockLLMProvider`) and the orchestrator
   loop (`ScriptedLLMProvider` + a fake browser via `browser_factory`).
 - `tests/core/` — NEM12 parsing, ingestion, tariff schema, cost calculator,
-  load-shift elasticity.
-- `tests/test_settings.py` — GUI settings persistence.
+  load-shift elasticity, **period selection + multi-year averaging**
+  (`test_period_selection.py`).
+- `tests/test_settings.py` — GUI settings persistence (incl. the
+  `period_mode`/`period_from`/`period_to` keys).
 
 When you add or change behaviour, add a test alongside it (see the workflow
 section at the top of this file).
+
+---
+
+## Analysis Period selection + multi-year averaging
+
+On the **Analyse** tab, picking a NEM12 file parses it **in the background**
+(`CoreView._begin_parse` → daemon thread → `IngestionPipeline().load()`). The
+resulting `MeterDataSet` is cached on `CoreView._meter` and **reused at Run**
+— no double-parse. The **Available period** label shows
+`start_date–end_date` (full `dd/mm/yyyy`); the Run button is disabled (text
+`Loading…`) until the parse completes.
+
+### Window & year selection
+
+- **All available** (default) → full-year window `(1/1)–(12/31)`, `years=None`.
+- **Custom** → `From`/`To` entries in `dd/mm` (a `dd/mm/yyyy` value is accepted
+  but the year is ignored). Wrap-around is allowed: `From > To` crosses
+  year-end (e.g. `1/12–28/2` = summer).
+- When a custom window exists in **≥2 years**, `_YearChooserDialog` (a modal
+  `CTkToplevel`) offers **Both (averaged)** (default → `years=None`) or a single
+  year. Cancel aborts the run.
+
+### Clamp / overlap (calendar-window level)
+
+Computed before the background compare, on the main thread:
+
+- `available_month_days(meter, years)` = union of `(month, day)` over the
+  selected years.
+- `has_overlap(window, avail)` `False` → hard error dialog.
+- `build_clamp_message(window, avail)` returns a trim prompt for a partial
+  window → `messagebox.askyesno`; **No** aborts.
+
+### `select_period` (`core/ingestion/period.py`)
+
+Pure pandas, offline-testable. Returns a `PeriodResolution(meter, period_days,
+effective_start_md, effective_end_md, averaged, years_used, notes)`. The
+resolution's `meter` is fed unchanged into `ComparisonEngine.compare`;
+`ComparisonResult.period_days` derives from `meter.e1.index.date`
+(`report.py:125`) so the averaged representative day count flows through.
+
+Algorithm:
+
+1. Filter `e1`/`b1` rows whose `(month, day)` ∈ `target_calendar_dates(...)`
+   and (if `years` given) whose year ∈ `years`.
+2. **Average per `(month, day)`** by interval **position**: each contributing
+   day is normalised to a fixed 48-slot grid (DST spring-forward days, which
+   end up with 46 rows post-dedup in the pipeline, are zero-padded to 48);
+   mean the kWh per position across contributing days. `b1` is averaged the
+   same way so solar credits are averaged too.
+3. **Re-stamp** each averaged day onto the reference year = earliest selected
+   year that contains that `(m,d)`, via
+   `pd.date_range(...).tz_localize("Australia/Melbourne",
+   ambiguous="infer", nonexistent="shift_forward")` (mirrors `pipeline.py`).
+4. Build a new `MeterDataSet`; `period_days = len(set(e1.index.date))`.
+
+### Known limitation (weekday smoothing)
+
+Averaging is **kWh-level** ("average then cost"). Because weekdays differ
+across years for the same calendar date, weekday-specific ToU / free-window
+plans are **slightly smoothed** under multi-year averaging. Flat, step, and
+7-day-free-window plans are exact (verified in
+`test_select_period_flat_rate_averaged_equals_mean_of_years`). Cost-level
+(Strategy B) averaging is out of scope.
+
+### Settings
+
+`gui/settings.py` `DEFAULTS` adds `period_mode` (`"all"`/`"custom"`),
+`period_from`, `period_to` (loose `dd/mm` strings; ignored if they don't
+parse). `CoreView.collect_state` / `_apply_settings` round-trip them.
+
+### CLI parity
+
+`cli_main` accepts optional `--from`/`--to` (`dd/mm`) and
+`--year {all|YYYY}`, applying `select_period` before `engine.compare`.
 
 ---
 

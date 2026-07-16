@@ -135,6 +135,24 @@ class ComparisonEngine:
 # ── CLI entry point ────────────────────────────────────────────────────────────
 
 
+def _parse_cli_md(text: str) -> tuple[int, int]:
+    """Parse a CLI ``dd/mm`` (or ``dd/mm/yyyy``) arg into ``(month, day)``."""
+    import datetime
+
+    parts = text.strip().split("/")
+    if len(parts) < 2:
+        raise ValueError("--from/--to must be day/month, e.g. 1/6")
+    try:
+        day, month = int(parts[0]), int(parts[1])
+    except ValueError as exc:
+        raise ValueError("--from/--to must be day/month, e.g. 1/6") from exc
+    try:
+        datetime.date(2000, month, day)  # leap ref year
+    except ValueError as exc:
+        raise ValueError(f"{day}/{month} is not a valid date") from exc
+    return (month, day)
+
+
 def cli_main(argv: list[str] | None = None) -> None:
     """Print a ranked cost table from NEM12 + plans directory."""
     parser = argparse.ArgumentParser(
@@ -142,6 +160,23 @@ def cli_main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--nem12", required=True, type=Path, help="Path to NEM12 CSV file")
     parser.add_argument("--plans-dir", required=True, type=Path, help="Directory of plan JSON files")
+    parser.add_argument(
+        "--from",
+        dest="from_md",
+        default=None,
+        help="Analysis window start as dd/mm (day/month). Omit for the full file range.",
+    )
+    parser.add_argument(
+        "--to",
+        dest="to_md",
+        default=None,
+        help="Analysis window end as dd/mm (day/month). Omit for the full file range.",
+    )
+    parser.add_argument(
+        "--year",
+        default="all",
+        help="all (default, averages matching months across years) or a single YYYY.",
+    )
     args = parser.parse_args(argv)
 
     pipeline = IngestionPipeline()
@@ -156,6 +191,25 @@ def cli_main(argv: list[str] | None = None) -> None:
         print(f"No valid plan JSON files found in {args.plans_dir}", file=sys.stderr)
         sys.exit(1)
 
+    # Optional period selection + multi-year averaging.
+    resolution_notes: list[str] = []
+    if args.from_md or args.to_md:
+        from ..ingestion.period import select_period
+        try:
+            from_md = _parse_cli_md(args.from_md) if args.from_md else (1, 1)
+            to_md = _parse_cli_md(args.to_md) if args.to_md else (12, 31)
+        except ValueError as exc:
+            print(f"ERROR parsing period: {exc}", file=sys.stderr)
+            sys.exit(1)
+        years = None if args.year.lower() == "all" else [int(args.year)]
+        try:
+            resolution = select_period(meter, from_md, to_md, years)
+        except ValueError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(1)
+        meter = resolution.meter
+        resolution_notes = resolution.notes
+
     if meter.warnings:
         print("DATA WARNINGS:")
         for w in meter.warnings:
@@ -164,6 +218,11 @@ def cli_main(argv: list[str] | None = None) -> None:
 
     engine = ComparisonEngine()
     result = engine.compare(meter, plans)
+
+    for note in resolution_notes:
+        print(f"  • {note}")
+    if resolution_notes:
+        print()
 
     days = result.period_days
     print(f"NMI: {result.nmi}  |  Analysis period: {days} days\n")

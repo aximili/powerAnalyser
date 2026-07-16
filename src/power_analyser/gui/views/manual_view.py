@@ -4,15 +4,21 @@ extract the plan straight into the comparison engine.
 This is the fast path when you already have the rates on screen: instead of
 letting the autonomous agent drive a browser, you simply
 
-  1. enter the **provider** (retailer) name,
-  2. optionally enter the **plan name**,
-  3. paste (Ctrl/Cmd-V) or browse for a **screenshot** of the rates — or upload
+  1. optionally enter the **provider** (retailer) name and **plan name**
+     (leave them blank to have the model infer them from the page),
+  2. paste (Ctrl/Cmd-V) or browse for a **screenshot** of the rates — or upload
      a **PDF** rate sheet (Browse… / drag & drop),
-  4. click **Extract**.
+  3. click **Extract Plan**.
 
-Because the retailer (and optionally the plan name) are supplied by you, the
-LLM only has to read the rates — which works far more reliably with smaller
+If the provider name is empty on the first click, a lightweight identity-inference
+call reads just the retailer and plan name off the rate page, pre-fills the
+fields, and asks you to confirm; the full rate extraction runs on the second
+click. Because the retailer (and optionally the plan name) are then supplied,
+the LLM only has to read the rates — which works far more reliably with smaller
 local models than asking them to also identify the brand from a screenshot.
+
+Each extracted plan is upserted to ``data/plans/{plan_id}.json`` so it persists
+across restarts and is picked up by the Analyse tab.
 
 PDFs are rendered to an image (pages stitched together) and their text is
 extracted, so both vision and text-only models can read them.
@@ -31,6 +37,8 @@ from typing import Any, Callable, Optional
 
 import customtkinter as ctk
 
+from power_analyser.agent.extractors.plan_extractor import PlanExtractor
+from power_analyser.core.tariff.loader import save_plan
 from power_analyser.core.tariff.schema import ElectricityPlan
 
 from ..widgets.llm_config_frame import LLMConfigFrame, default_llm_vars
@@ -40,7 +48,9 @@ logger = logging.getLogger(__name__)
 _IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".gif", ".tiff")
 _PDF_EXTS = (".pdf",)
 _ACCEPTED_EXTS = _IMAGE_EXTS + _PDF_EXTS
-_PREVIEW_MAX = 420  # max preview dimension in pixels
+_PREVIEW_MAX = 220  # max preview dimension in pixels — bounded so the action
+                    # row (Extract button + result box) always stays visible,
+                    # even when a large multi-page PDF is dropped in.
 
 
 class ManualView(ctk.CTkFrame):
@@ -89,7 +99,14 @@ class ManualView(ctk.CTkFrame):
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(3, weight=1)
+        # Row 2 (the Rate page panel) is not weighted, so it stays at the
+        # natural size of its (bounded) preview image. Row 3 (action: Extract
+        # button + result box) gets all remaining space with a guaranteed
+        # ``minsize`` so the button can never be pushed off-screen by a large
+        # PDF preview. Tk's grid has no ``maxsize`` for rows, so the preview
+        # image itself is capped via ``_PREVIEW_MAX`` in ``_show_preview``.
+        self.rowconfigure(2, weight=0)
+        self.rowconfigure(3, weight=1, minsize=200)
 
         # ── Shared LLM config ──
         self._llm_config = LLMConfigFrame(self, shared_vars=self._llm_vars)
@@ -301,9 +318,6 @@ class ManualView(ctk.CTkFrame):
 
         retailer = self._retailer_entry.get().strip()
         plan_name = self._plan_name_entry.get().strip()
-        if not retailer:
-            self._set_result("Enter the provider (retailer) name first.")
-            return
 
         try:
             config = self._llm_config.build_config()
@@ -311,7 +325,6 @@ class ManualView(ctk.CTkFrame):
             self._set_result(f"ERROR building config: {exc}")
             return
 
-        from power_analyser.agent.extractors.plan_extractor import PlanExtractor
         from power_analyser.agent.llm.base import create_provider
 
         try:
@@ -320,10 +333,80 @@ class ManualView(ctk.CTkFrame):
             self._set_result(f"ERROR creating LLM provider: {exc}")
             return
 
+        # Two-phase flow: if the provider (retailer) name is still empty, ask
+        # the LLM to read it (plus the plan name) off the rate page, pre-fill
+        # the fields, and ask the user to confirm. The full extraction runs on
+        # the NEXT click, once the provider name is populated. This keeps a
+        # small model honest: it only has to confirm identity, not guess it
+        # silently while also reading the rates.
+        if not retailer:
+            self._infer_identity(provider)
+            return
+
+        self._begin_extraction(provider, retailer, plan_name)
+
+    # ── Phase 1: infer retailer / plan name ────────────────────────────────────
+
+    def _infer_identity(self, provider) -> None:
+        self._extract_btn.configure(state="disabled", text="Identifying…")
+        self._set_result("Reading the provider and plan name from the rate page…")
+        image_bytes = self._image_bytes
+        page_text = self._pdf_text or ""
+        thread = threading.Thread(
+            target=self._run_identity_inference,
+            args=(provider, image_bytes, page_text),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_identity_inference(
+        self, provider, image_bytes: bytes, page_text: str
+    ) -> None:
+        try:
+            extractor = PlanExtractor(provider)
+            retailer, plan_name = extractor.infer_identity_from_screenshot(
+                image_bytes, page_text=page_text
+            )
+            self.after(
+                0, lambda r=retailer, p=plan_name: self._on_identity_inferred(r, p)
+            )
+        except Exception as exc:
+            self.after(0, lambda e=exc: self._on_identity_error(e))
+
+    def _on_identity_inferred(self, retailer: str, plan_name: str) -> None:
+        self._extract_btn.configure(state="normal", text="Extract Plan")
+        if not retailer:
+            self._set_result(
+                "Couldn't determine the provider name from the rate page. "
+                "Please enter the provider (retailer) name manually, then click "
+                "Extract Plan."
+            )
+            return
+        # Pre-fill the identity fields so the user can confirm or correct them.
+        self._retailer_entry.delete(0, "end")
+        self._retailer_entry.insert(0, retailer)
+        if plan_name:
+            self._plan_name_entry.delete(0, "end")
+            self._plan_name_entry.insert(0, plan_name)
+        msg = f"I've pre-populated the provider ({retailer!r})"
+        if plan_name:
+            msg += f" and plan name ({plan_name!r})"
+        msg += (
+            " from the rate page. Please check them and click Extract Plan "
+            "again to continue."
+        )
+        self._set_result(msg)
+
+    def _on_identity_error(self, exc: Exception) -> None:
+        self._extract_btn.configure(state="normal", text="Extract Plan")
+        self._set_result(f"ERROR inferring identity: {exc}")
+
+    # ── Phase 2: full extraction ───────────────────────────────────────────────
+
+    def _begin_extraction(self, provider, retailer: str, plan_name: str) -> None:
         self._running = True
         self._extract_btn.configure(state="disabled", text="Extracting…")
         self._set_result("Sending the rate page to the LLM…")
-
         image_bytes = self._image_bytes
         page_text = self._pdf_text or ""
         thread = threading.Thread(
@@ -359,11 +442,26 @@ class ManualView(ctk.CTkFrame):
                 "or try a clearer screenshot / PDF of the rates."
             )
             return
+
+        # Upsert each plan to data/plans/{plan_id}.json so the result persists
+        # and is picked up by the Analyse tab / comparison engine. Failures are
+        # non-fatal — the plans still flow into the in-memory comparison set.
+        saved_paths: list[str] = []
+        for p in plans:
+            try:
+                saved_paths.append(str(save_plan(p)))
+            except Exception as exc:
+                logger.warning("Could not save plan %s: %s", p.plan_id, exc)
+
         lines = [f"Extracted {len(plans)} plan(s):"]
         for p in plans:
             supply = p.daily_supply_charge
             rates = ", ".join(f"{t.name} {t.rate}$/kWh" for t in p.usage_tiers)
             lines.append(f"• {p.retailer} — {p.plan_name}  |  supply {supply}$/day  |  {rates}")
+        if saved_paths:
+            lines.append("")
+            lines.append("Saved to:")
+            lines.extend(f"  {p}" for p in saved_paths)
         self._set_result("\n".join(lines))
         self._on_plans_found(plans)
 

@@ -75,7 +75,7 @@ class IngestionPipeline:
         e1_df, w = _records_to_dataframe(e1_records, E1_SUFFIX)
         all_warnings.extend(w)
 
-        b1_df = pd.DataFrame(columns=["kwh"])
+        b1_df = _empty_kwh_frame()
         if b1_records:
             b1_df, w = _records_to_dataframe(b1_records, B1_SUFFIX)
             all_warnings.extend(w)
@@ -96,6 +96,18 @@ class IngestionPipeline:
 # ── Private helpers ─────────────────────────────────────────────────────────
 
 
+def _empty_kwh_frame() -> pd.DataFrame:
+    """An empty ``kwh`` DataFrame with a tz-aware Melbourne ``DatetimeIndex``.
+
+    Using a ``DatetimeIndex`` (instead of the default ``RangeIndex`` you get
+    from ``pd.DataFrame(columns=[...])``) keeps ``.index.date`` / ``.index.year``
+    safe on empty streams — e.g. a file whose E1/B1 ``200`` record has no
+    interval data, or a file with no solar (B1) stream at all.
+    """
+    idx = pd.DatetimeIndex([], tz=MELBOURNE_TZ)
+    return pd.DataFrame({"kwh": pd.Series(dtype=float)}, index=idx)
+
+
 def _records_to_dataframe(
     records: list[NMIRecord], suffix: str
 ) -> tuple[pd.DataFrame, list[str]]:
@@ -105,13 +117,20 @@ def _records_to_dataframe(
 
     for record in records:
         for block in record.blocks:
-            series, w = _block_to_series(block, record.interval_length_min)
+            try:
+                series, w = _block_to_series(block, record.interval_length_min)
+            except Exception as exc:
+                # Surface exactly which NMI/suffix/date broke so a parse failure
+                # on a large file is pinpointable instead of a bare exception.
+                raise ValueError(
+                    f"Failed to convert {block.suffix} block for NMI {block.nmi} "
+                    f"on {block.date} ({len(block.intervals)} intervals): {exc}"
+                ) from exc
             all_series.append(series)
             warnings.extend(w)
 
     if not all_series:
-        empty = pd.DataFrame(columns=["kwh"])
-        return empty, warnings
+        return _empty_kwh_frame(), warnings
 
     combined = pd.concat(all_series).sort_index()
     # Remove exact duplicates (same timestamp appearing in overlapping date ranges)
@@ -178,11 +197,16 @@ def _block_to_series(
     )
 
     try:
-        # nonexistent="shift_forward" handles any remaining spring-forward edge
-        # ambiguous="infer" handles fall-back ambiguity by context
+        # nonexistent="shift_forward" handles spring-forward (02:00/02:30 don't exist).
+        # ambiguous=False resolves fall-back ambiguity: on the April fall-back day the
+        # merged 48-slot index has ambiguous 02:00/02:30 (already summed from the 50
+        # raw intervals); we resolve them to non-DST (AEST). This preserves the
+        # time-of-day used for tariff matching and keeps every day in Melbourne tz.
+        # (ambiguous="infer" can't infer DST from a single isolated day and would
+        # raise, forcing the UTC fallback below — which then breaks mixed-tz concat.)
         tz_index = index.tz_localize(
             MELBOURNE_TZ,
-            ambiguous="infer",
+            ambiguous=False,
             nonexistent="shift_forward",
         )
     except Exception as exc:
