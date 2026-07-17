@@ -161,3 +161,54 @@ def test_fall_back_dst_day_parses_without_mixed_tz(tmp_path):
     assert isinstance(list(meter_data.e1.index.date), list)
 
 
+# ── Short day (maintenance outage) — unexpected interval count ────────────────
+
+
+def test_short_day_pads_missing_intervals_and_warns(tmp_path):
+    """A day with fewer than 48 intervals must be zero-padded and flagged.
+
+    Real-world trigger: a scheduled supply outage during which the meter logs
+    nothing. Here, 8 hours = 16 missing half-hour intervals, so only 32 of 48
+    readings are present. The pipeline must not crash; it pads the missing
+    period to 0 kWh and emits an "unexpected interval count" warning so the
+    outage is visible (and not silently billed as if the data were complete).
+    """
+    def line300(datestr, n, val="0.1"):
+        return "300," + datestr + "," + ",".join(val for _ in range(n)) + ",A,,,"
+
+    csv = (
+        "\n".join(
+            [
+                "100,NEM12,6408088506",
+                "200,6408088506,B1E1,E1,E1,,1217287,KWH,30,",
+                line300("20240609", 48),   # normal full day
+                line300("20240610", 32),   # outage: 16 intervals missing (8h)
+                "900",
+            ]
+        )
+        + "\n"
+    )
+    path = tmp_path / "outage.csv"
+    path.write_text(csv, encoding="utf-8")
+
+    meter = IngestionPipeline().load(path)
+
+    outage = datetime.date(2024, 6, 10)
+    rows = meter.e1[meter.e1.index.date == outage]
+
+    # Padded back to a full 48-slot day so downstream code (.index.date, the
+    # calculator) never sees a short row set.
+    assert len(rows) == 48, "Short day must be padded back to 48 slots"
+    # The 16 missing intervals are filled with 0.0 kWh (outage = no usage).
+    assert int((rows["kwh"] == 0.0).sum()) == 16
+    # The 32 recorded intervals are preserved (not zeroed or dropped).
+    assert int((rows["kwh"] != 0.0).sum()) == 32
+
+    # Exactly one data-quality warning, naming the outage date and the count.
+    assert len(meter.warnings) == 1
+    w = meter.warnings[0]
+    assert "2024-06-10" in w
+    assert "unexpected interval count" in w
+    assert "32" in w
+
+

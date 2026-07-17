@@ -95,7 +95,10 @@ def test_step_tariff_unknown_tier_raises():
 
 
 def test_load_all_sample_plans():
-    plans = load_plans_dir(PLANS_DIR)
+    # data/plans/ is the shared store for bundled samples AND extracted real
+    # plans (e.g. globird_*), so scope the count to sample_ files only.
+    sample_files = sorted(PLANS_DIR.glob("sample_*.json"))
+    plans = [load_plan(p) for p in sample_files]
     assert len(plans) == 3, f"Expected 3 sample plans, got {len(plans)}"
 
 

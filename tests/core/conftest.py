@@ -94,3 +94,42 @@ def step_tariff_plan_dict():
             {"threshold_kwh_per_day": 5.0, "tier_below": "Low", "tier_above": "High"}
         ],
     }
+
+
+@pytest.fixture
+def perfect_day_plan_dict():
+    """Combined plan for the 'Perfect Day' end-to-end hand-math test.
+
+    Layers every tariff feature together:
+      - Daily supply charge: $1.20
+      - Super Off-Peak free window 11:00-16:00, capped at 5 kWh/day,
+        overflow billed at the Flat tier
+      - Flat $0.30/kWh catch-all
+      - Flat FiT $0.05/kWh
+    """
+    return {
+        "plan_id": "test_perfect_day",
+        "retailer": "Test Retailer",
+        "plan_name": "Perfect Day Combined",
+        "daily_supply_charge": "1.20",
+        "usage_tiers": [
+            {"name": "Flat", "rate": "0.30", "schedule": []}
+        ],
+        "free_windows": [
+            {
+                "name": "Super Off-Peak",
+                "schedule": [
+                    {
+                        "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                        "start": "11:00",
+                        "end": "16:00",
+                    }
+                ],
+                "fair_use_cap_kwh": 5.0,
+                "overflow_tier": "Flat",
+            }
+        ],
+        "fit_tiers": [
+            {"name": "FiT", "rate": "0.05", "schedule": []}
+        ],
+    }
