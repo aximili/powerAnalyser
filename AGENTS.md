@@ -27,6 +27,93 @@ When changing any code in this repository:
    possible, construct the window then destroy it immediately
    (`app = PowerAnalyserApp(); app.update(); app.destroy()`) to catch wiring
    errors.
+6. **Reflect on accuracy after accuracy-sensitive work** — see the next
+   section. Skip for trivial changes (typos, comments, pure formatting, GUI
+   wiring that doesn't touch numbers).
+
+---
+
+## Post-task accuracy review (only after accuracy-sensitive work)
+
+Accuracy is critical in this app: a miscalculation or a misparsed plan means
+real financial loss for the user. After finishing any change that touches
+**numbers or data flow** — i.e. anything in `core/` (tariffs, ingestion,
+`period.py`, cost calculator, load-shift elasticity) or `agent/extractors/`
+(plan JSON, repair pass) — the agent must do a short reflection pass and, when
+there is something genuinely worth doing, surface it. **Stay silent if there is
+nothing meaningful to add** — never pad the response with a generic "consider
+adding tests".
+
+### Trigger condition
+
+Reflect **only** when the change affects at least one of:
+- Tariff math, rounding, or unit conversions
+- NEM12 ingestion, DST handling, or the 48-slot normalisation in `period.py`
+- Plan extraction JSON, `plan_id` dedup, or `last_updated` stamping
+- Multi-year averaging, weekday smoothing, or `ComparisonResult.period_days`
+- Eligibility / `conditions` strings that gate a discount
+
+### Sharp edges to check against
+
+- **DST**: 46-row spring-forward days must zero-pad back to 48 slots
+  (`period.py`).
+- **`plan_id`**: dedup in the repair pass must be stable — re-extraction
+  overwrites the same file (`core/tariff/loader.py`).
+- **`last_updated`**: never taken from the model; stamped at capture time by
+  `PlanExtractor._finalize`. Hand-authored `load_plan` JSON preserves the file
+  value.
+- **Rounding**: flat/step/7-day-free-window plans are exact under multi-year
+  averaging; weekday-specific ToU is smoothed (known limitation).
+- **`conditions`**: discount-gating strings must flow from the page into the
+  schema during extraction.
+
+### Output format
+
+After the normal final summary, add **one short block** (3–6 lines) headed
+**Suggested next step for accuracy** — and only when there is something real and really worth doing.
+Format:
+
+- **What** — the specific gap or hardening, with a `file:line` reference.
+- **Why it matters** — which sharp edge above it addresses (or a new one), and importance (e.g. critical / high / medium / nice to have / better to omit than cluttering the codebase)
+- **Action** — one of:
+   - *Do it now* (small, in-context): a one-line command or edit.
+   - *New session* (large refactor, deep investigation, or parallel work):
+     emit a **self-contained paste-ready prompt** the user can drop into a
+     fresh session. It must include: file paths, line refs, the invariant that
+     must be preserved, the test command (`python -m pytest tests/ -v`), and a
+     note that the existing offline test suite must stay green.
+
+A reflection block that says "looks fine, nothing to add" is worse than no
+block — omit it.
+
+### End-of-turn next steps
+
+After finishing a task, when there are **genuine, in-context** follow-ups
+the user is likely to want (a small edit, an obvious test to add, a config
+tweak, running the suite), surface them as a short numbered list and ask
+whether to proceed — so a single `yes` is enough to continue. This mirrors
+the ClaudeCode pattern the user is used to:
+
+1. <one-line suggestion>
+2. <one-line suggestion>
+
+Want me to do these? Reply `yes` for all, or pick by number.
+
+Rules:
+
+- **Only when there's something real.** No "consider adding tests" /
+  "review the code" filler — an empty ending beats a padded one.
+- **In-context only.** Large work (a refactor, deep investigation, parallel
+  tracks) gets a one-line mention and a pointer to a new session, not an
+  inline offer.
+- **Accuracy "do it now" items** should also appear in this list (as
+  one-liners — the detail stays in the **Suggested next step for accuracy**
+  block above), so they get the same `yes` confirmation gate. "New session"
+  items stay in the block above with their paste-ready prompt; a one-line
+  pointer here is fine but they aren't gated by `yes`.
+- Keep the list to **2–4 items**; merge trivial ones.
+- This deliberately overrides Kilo's global "don't end with a question"
+  default **for this project** — the explicit confirmation gate is the point.
 
 ---
 
