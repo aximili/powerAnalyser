@@ -326,10 +326,11 @@ python -m pytest tests/ -v
   load-shift elasticity, **period selection + multi-year averaging**
   (`test_period_selection.py`), **comparison engine** (`test_report.py`), and
   **JSON loader round-trip + upsert + malformed-JSON handling**
-  (`test_loader.py`). The cost-calculator suite includes a `strict=True`
-  `xfail` that pins the confirmed per-window-step-threshold billing bug
+  (`test_loader.py`). The cost-calculator suite includes a passing test for
+  the per-window-step-threshold fix
   (`test_free_window_consumption_should_not_consume_step_threshold`) and a
-  characterisation test for `step_tariffs[1]` being silently ignored today.
+  characterisation test for `step_tariffs[1]` being silently ignored
+  (`test_second_step_tariff_is_silently_ignored`).
 - `tests/test_settings.py` — GUI settings persistence (incl. the
   `period_mode`/`period_from`/`period_to` keys).
 

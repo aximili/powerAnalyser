@@ -60,7 +60,7 @@ class ComparisonEntry:
 class ComparisonResult:
     """Full comparison across all plans, ordered cheapest-first."""
 
-    ranked: list[ComparisonEntry]   # sorted by baseline_net ascending
+    ranked: list[ComparisonEntry]   # sorted by simulated_net (if present) else baseline_net, ascending
     warnings: list[str]            # DST or data quality warnings from ingestion
     period_days: int                # number of calendar days in the dataset
     nmi: str
@@ -120,7 +120,7 @@ class ComparisonEngine:
                 )
             )
 
-        ranked = sorted(entries, key=lambda e: e.baseline_net)
+        ranked = sorted(entries, key=lambda e: e.simulated_net if e.simulated_net is not None else e.baseline_net)
 
         period_days = len(set(meter.e1.index.date)) if not meter.e1.empty else 0
 

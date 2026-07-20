@@ -315,32 +315,29 @@ def test_shift_saving_negative_when_shift_raises_cost():
     assert entry.shift_saving == Decimal("0")
 
 
-# ── Ranking-by-baseline product decision (PIN CURRENT BEHAVIOUR) ──────────────
+# ── Ranking uses effective cost (simulated_net when available) ────────────────
 #
-# PRODUCT DECISION — surfacing, not resolving. See the audit report's "Design
-# decisions surfaced" section. The engine ranks by ``baseline_net`` even when
-# an ElasticityConfig makes another plan cheaper POST-shift
-# (report.py:123 ``sorted(..., key=lambda e: e.baseline_net)``). That can hide
-# the plan that is genuinely cheapest for a user who has agreed to shift load.
+# The engine ranks by ``simulated_net`` when an ElasticityConfig was provided
+# for a plan, and falls back to ``baseline_net`` for plans without one.
+# Sort key: ``e.simulated_net if e.simulated_net is not None else e.baseline_net``
 #
-# This test pins the CURRENT behaviour so any change is visible. If the product
-# decision flips to "rank by simulated_net when elasticity is supplied", this
-# test MUST be updated (and a companion added for the new ordering).
+# This answers "what is the cheapest plan given I'm willing to shift load?"
+# A user who supplies an ElasticityConfig has already signalled willingness
+# to shift, so ranking by the shifted result is the correct answer.
 
 
 def test_ranks_by_baseline_even_when_another_plan_is_cheaper_post_shift():
-    """Ranking uses ``baseline_net``; a post-shift-cheaper plan is NOT promoted.
+    """Ranking promotes the plan that is cheapest AFTER load-shifting.
 
     Plan A: flat $0.20, no free window.
         baseline = 1.00 + 2.0 × 0.20 = 1.40   (no elasticity → simulated_net None)
+        sort key = baseline_net = 1.40
     Plan B: Peak $0.50 (Mon 17:00-21:00) + free Midday window.
         baseline = 1.00 + 2.0 × 0.50 = 2.00
         simulated (after shifting 2 kWh peak → free Midday) = 1.00 + 0 = 1.00
+        sort key = simulated_net = 1.00
 
-    Post-shift, B ($1.00) is cheaper than A ($1.40). But the ranking still
-    orders A first because ``sorted(key=baseline_net)`` ignores simulated_net.
-    This pins the current product decision; revisiting it is engine work and
-    requires user sign-off (see the test_report.py module docstring note).
+    Post-shift, B ($1.00) is cheaper than A ($1.40), so B is ranked first.
     """
     plan_a = _flat_plan("A", "0.20")
     plan_b = ElectricityPlan.model_validate(
@@ -403,14 +400,8 @@ def test_ranks_by_baseline_even_when_another_plan_is_cheaper_post_shift():
     assert b_entry.simulated_net == Decimal("1.00")  # cheaper than A's baseline
     assert b_entry.shift_saving == Decimal("1.00")
 
-    # CURRENT behaviour: ranking is by baseline_net → A first despite B being
-    # cheaper post-shift. If this assertion ever needs to flip, the ranking
-    # contract has changed — update together with a release note.
-    assert [e.plan_id for e in result.ranked] == ["A", "B"], (
-        "ranking no longer sorts by baseline_net; if this is intentional "
-        "(e.g. rank by simulated_net when elasticity is supplied), update "
-        "this test AND the audit report's product-decision section."
-    )
+    # B has simulated_net $1.00 < A's baseline_net $1.40 → B ranks first.
+    assert [e.plan_id for e in result.ranked] == ["B", "A"]
 
 
 # ── Field forwarding ──────────────────────────────────────────────────────────

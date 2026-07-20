@@ -165,7 +165,10 @@ class CostCalculator:
                 else:
                     usage += kwh_dec * _find_active_tier(plan, dow, t).rate
 
-            daily_consumption_total += kwh_dec
+                # Only count non-free-window kWh toward the step threshold.
+                # Free-window usage has its own cap (daily_promotional_usage)
+                # and must not consume the off-peak step's daily allowance.
+                daily_consumption_total += kwh_dec
 
             # ── Solar FiT ─────────────────────────────────────────────────────
             if i < len(b1_values) and b1_values[i] > 0:
