@@ -900,3 +900,191 @@ def test_zero_consumption_day_with_solar_export(flat_rate_plan_dict):
     assert result.total_supply == Decimal("1.00")
     assert result.total_solar_credit == Decimal("10") * Decimal("0.06")
     assert result.total_net == Decimal("1.00") - Decimal("10") * Decimal("0.06")
+
+
+# ── Step tariff × free-window interaction (known bug) ─────────────────────────
+#
+# These two tests document a confirmed billing bug surfaced by the real plan
+# data/plans/globird_four4free.json (see audit note below). They are NOT a fix;
+# they pin the current (buggy) behaviour and the correct intended behaviour so
+# any future engine rewrite is forced to update them visibly.
+#
+# AUDIT — confirmed by execution (Deliverable 1 of the audit):
+#   The real GloBird FOUR4FREE plan carries TWO step tariffs (a 15 kWh off-peak
+#   step and a 50 kWh midday-free-window step). The engine reads ONLY
+#   ``plan.step_tariffs[0]`` (calculator.py:113) and tracks ONE global
+#   ``daily_consumption_total`` (calculator.py:109) that is incremented
+#   UNCONDITIONALLY on every interval — including free-window kWh
+#   (calculator.py:168). Free midday usage therefore eats the off-peak window's
+#   first-tier allowance, rerating off-peak usage to the expensive tier.
+#
+#   Reproducing vector on the real plan (Mon 2024-06-03):
+#       values = [0.0]*22 + [1.875]*8 + [0.625]*16 + [0.0]*2
+#     → engine net $4.928 (buggy) vs $4.818 (correct) = $0.11/day over-bill.
+#
+# Real plans need PER-WINDOW step thresholds. The engine's single global
+# ``daily_consumption_total`` cannot represent two independent per-window
+# buckets. See "Suggested next step for accuracy" in the audit report for the
+# design options (per-tier cumulative counters vs. reject multi-step plans).
+# That is a calculator.py core change and is deliberately NOT done here.
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Known billing bug: calculator.py tracks a single global "
+        "daily_consumption_total that is incremented by free-window usage "
+        "(calculator.py:168), so free midday kWh consume the off-peak step "
+        "threshold and off-peak usage is rerated to tier_above. Fix requires "
+        "per-window cumulative counters (calculator.py core rewrite). When "
+        "this test XPASSes, remove the xfail and add a green companion that "
+        "pins the corrected behaviour."
+    ),
+)
+def test_free_window_consumption_should_not_consume_step_threshold():
+    """Off-window usage must NOT be rerated to ``tier_above`` just because
+    free-window usage pushed the global daily counter past the step threshold.
+
+    This is the CORRECT intended behaviour. It FAILS today (xfail strict) and
+    documents the per-window-threshold bug with a minimal synthetic plan so
+    the assertion is independent of the real FOUR4FREE JSON.
+
+    Plan (synthetic, deliberately minimal):
+      - OffPeak   $0.10  catch-all  (the cheap below-threshold rate)
+      - Expensive $0.50  catch-all  (the above-threshold rate)
+      - Free window "Midday" 11:00-13:00 (4 intervals), uncapped,
+        overflow_tier=OffPeak
+      - Step tariff: threshold 5.0 kWh, tier_below=OffPeak, tier_above=Expensive
+
+    Mon 2024-06-03. Only two blocks carry load:
+      - idx 22-25 (11:00-12:30, free window): 1.5 kWh × 4 = 6.0 kWh (free)
+      - idx 30-33 (15:00-16:30, off-window):  0.5 kWh × 4 = 2.0 kWh
+
+    CORRECT hand-math (per-window intent — the bug fix):
+      Free-window usage is FREE and must NOT count toward the off-window step
+      bucket. The off-window's OWN cumulative is 2.0 kWh, which is < the 5.0 kWh
+      threshold, so ALL off-window usage bills at OffPeak $0.10:
+
+        total_usage              = 2.0 × 0.10 = 0.20
+        total_promotional_saving = 6.0 × 0.10 = 0.60   (free kWh valued at OffPeak)
+        total_net                = 1.00 + 0.20       = 1.20
+
+    BUGGY hand-math (current engine — pinned by the strict-less companion below
+    is intentionally omitted; this xfail is the single source of truth):
+      ``daily_consumption_total`` reaches 6.0 during the free window
+      (calculator.py:168 runs even for free kWh), so by idx 30 the engine sees
+      ``dct=6.0 >= threshold 5.0`` and fires the ``already_above`` branch
+      (calculator.py:163-164), billing all 2.0 off-window kWh at Expensive:
+
+        total_usage (buggy) = 2.0 × 0.50 = 1.00
+        total_net   (buggy) = 1.00 + 1.00 = 2.00   ← what the engine returns today
+    """
+    plan = ElectricityPlan.model_validate(
+        {
+            "plan_id": "synthetic_step_free",
+            "retailer": "Test Retailer",
+            "plan_name": "Step + Free Window Interaction",
+            "daily_supply_charge": "1.00",
+            "usage_tiers": [
+                {"name": "OffPeak", "rate": "0.10", "schedule": []},
+                {"name": "Expensive", "rate": "0.50", "schedule": []},
+            ],
+            "free_windows": [
+                {
+                    "name": "Midday",
+                    "schedule": [
+                        {
+                            "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                            "start": "11:00",
+                            "end": "13:00",
+                        }
+                    ],
+                    "fair_use_cap_kwh": None,
+                    "overflow_tier": "OffPeak",
+                }
+            ],
+            "step_tariffs": [
+                {"threshold_kwh_per_day": 5.0, "tier_below": "OffPeak", "tier_above": "Expensive"}
+            ],
+        }
+    )
+    date = datetime.date(2024, 6, 3)  # Monday
+    values = [0.0] * 22 + [1.5] * 4 + [0.0] * 4 + [0.5] * 4 + [0.0] * 14
+    assert len(values) == 48
+    meter = _make_meter(date, values)
+
+    result = CostCalculator().calculate_period(meter, plan)
+
+    # ── Assert the CORRECT intended behaviour (fails today → xfail). ──
+    assert result.total_usage == Decimal("2.0") * Decimal("0.10")  # 0.20
+    assert result.total_promotional_saving == Decimal("6.0") * Decimal("0.10")  # 0.60
+    assert result.total_net == Decimal("1.00") + Decimal("2.0") * Decimal("0.10")  # 1.20
+
+
+def test_second_step_tariff_is_silently_ignored():
+    """Only ``plan.step_tariffs[0]`` is consulted; any later step is dropped.
+
+    Pins calculator.py:113 (``step = plan.step_tariffs[0]``). The FOUR4FREE
+    real plan declares TWO step tariffs; the second (50 kWh midday cap) is
+    structurally invisible to the engine today. This test documents that
+    current behaviour so it can be updated if/when per-window step counters
+    land. NB: the schema still accepts ``step_tariffs`` as a list, and the
+    ``_validate_tier_references`` validator still checks every entry's tier
+    names — so the second step must reference valid tiers even though it is
+    never evaluated.
+
+    Plan (synthetic):
+      - Low  $0.20  catch-all
+      - Mid  $0.30  catch-all
+      - High $0.40  catch-all
+      - step[0]: threshold 5.0,  tier_below=Low,  tier_above=Mid
+      - step[1]: threshold 10.0, tier_below=Mid,  tier_above=High   ← ignored today
+
+    Mon 2024-06-03, uniform 0.5 kWh × 48 = 24 kWh. Threshold 5.0 is landed-on
+    exactly at the end of interval #9 (dct 4.5 → 5.0).
+
+    Hand-math (CURRENT behaviour — only step[0] is used):
+      i 0..9   (dct 0.0 → 5.0):  else branch,        Low 0.20 → 5.0 × 0.20 = 1.00
+      i 10..47 (dct 5.0 → 24.0): already_above vs 5, Mid 0.30 → 19.0 × 0.30 = 5.70
+      total_usage = 6.70
+
+    Hand-math (HYPOTHETICAL — if step[1] were also applied):
+      i 0..9   (dct 0 → 5):  Low  0.20 → 5.0 × 0.20 = 1.00
+      i 10..19 (dct 5 → 10): Mid  0.30 → 5.0 × 0.30 = 1.50
+      i 20..47 (dct 10+):    High 0.40 → 14.0 × 0.40 = 5.60
+      total_usage = 8.10  ← NOT what the engine returns today
+
+    The $1.40 gap (8.10 − 6.70) is the behaviour this test pins as missing.
+    """
+    plan = ElectricityPlan.model_validate(
+        {
+            "plan_id": "test_two_step",
+            "retailer": "Test Retailer",
+            "plan_name": "Two Step Tariffs",
+            "daily_supply_charge": "1.00",
+            "usage_tiers": [
+                {"name": "Low", "rate": "0.20", "schedule": []},
+                {"name": "Mid", "rate": "0.30", "schedule": []},
+                {"name": "High", "rate": "0.40", "schedule": []},
+            ],
+            "step_tariffs": [
+                {"threshold_kwh_per_day": 5.0, "tier_below": "Low", "tier_above": "Mid"},
+                {"threshold_kwh_per_day": 10.0, "tier_below": "Mid", "tier_above": "High"},
+            ],
+        }
+    )
+    assert len(plan.step_tariffs) == 2, "schema accepts both steps"
+
+    date = datetime.date(2024, 6, 3)  # Monday
+    meter = _make_meter(date, [0.5] * 48)  # 24 kWh uniform
+
+    result = CostCalculator().calculate_period(meter, plan)
+
+    # Current behaviour: only step[0] (Low → Mid at 5.0 kWh) is consulted.
+    expected_usage = Decimal("5.0") * Decimal("0.20") + Decimal("19.0") * Decimal("0.30")
+    assert result.total_usage == expected_usage
+    assert result.total_usage == Decimal("6.70")
+
+    # If step[1] were applied, usage would be $8.10. Pin the gap explicitly so
+    # a future per-window implementation is forced to revisit this assertion.
+    assert result.total_usage != Decimal("5.0") * Decimal("0.20") + Decimal("5.0") * Decimal("0.30") + Decimal("14.0") * Decimal("0.40")

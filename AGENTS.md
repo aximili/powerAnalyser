@@ -324,7 +324,12 @@ python -m pytest tests/ -v
   loop (`ScriptedLLMProvider` + a fake browser via `browser_factory`).
 - `tests/core/` — NEM12 parsing, ingestion, tariff schema, cost calculator,
   load-shift elasticity, **period selection + multi-year averaging**
-  (`test_period_selection.py`).
+  (`test_period_selection.py`), **comparison engine** (`test_report.py`), and
+  **JSON loader round-trip + upsert + malformed-JSON handling**
+  (`test_loader.py`). The cost-calculator suite includes a `strict=True`
+  `xfail` that pins the confirmed per-window-step-threshold billing bug
+  (`test_free_window_consumption_should_not_consume_step_threshold`) and a
+  characterisation test for `step_tariffs[1]` being silently ignored today.
 - `tests/test_settings.py` — GUI settings persistence (incl. the
   `period_mode`/`period_from`/`period_to` keys).
 

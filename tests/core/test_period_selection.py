@@ -229,6 +229,15 @@ def test_select_period_flat_rate_averaged_equals_mean_of_years(flat_rate_plan_di
     expected_mean = (total_2025 + total_2026) / 2
     assert abs(float(averaged_total) - float(expected_mean)) < 0.01
 
+    # Independent ground truth — does NOT route the expected side through the
+    # calculator, so this also catches linear calculator bugs the self-referential
+    # check above cannot. 5 days × $1.00 supply + 360 kWh (5×48×1.5) × $0.30.
+    assert averaged_total == Decimal("5") * Decimal("1.00") + Decimal("360") * Decimal("0.30")
+    # Structural fields on the multi-year-both path.
+    assert res.averaged is True
+    assert res.years_used == [2025, 2026]
+    assert res.period_days == 5
+
 
 def _filter_meter_to_year(meter: MeterDataSet, year: int) -> MeterDataSet:
     e1 = meter.e1[meter.e1.index.year == year]
@@ -404,13 +413,20 @@ def test_b1_averaged_in_parallel(flat_rate_plan_dict):
     meter = _make_meter(by_date, b1_by_date)
 
     res = select_period(meter, (6, 1), (6, 1))
-    # Averaged export = 0.3 kWh/slot
+    assert res.averaged is True
+    assert res.years_used == [2025, 2026]
+    assert res.period_days == 1
+    # Averaged export = mean(0.2, 0.4) = 0.3 kWh/slot; averaged import = mean(1.0, 3.0) = 2.0.
     assert res.meter.b1["kwh"].iloc[0] == pytest.approx(0.3)
+    assert res.meter.e1["kwh"].iloc[0] == pytest.approx(2.0)
     assert not res.meter.b1.empty
 
-    # Solar credit reflects averaged export: 0.3 * 48 * 0.06
+    # Solar credit reflects averaged export: 14.4 kWh × $0.06 = $0.864. np.mean
+    # dust propagates via Decimal(str(float(...))), so approx is required for the
+    # solar figure; total_usage stays exact because E1 averaging is dust-free.
     result = CostCalculator().calculate_period(res.meter, plan)
     assert result.total_solar_credit == pytest.approx(Decimal(str(0.3 * 48 * 0.06)), abs=Decimal("0.01"))
+    assert result.total_usage == Decimal("28.80")
 
 
 # ── Extra: available_month_days + period_days flows through ComparisonResult ──

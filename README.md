@@ -122,6 +122,20 @@ window with no overlap at all is a hard error.
 > multi-year averaging. Flat, step, and 7-day-free-window plans are exact.
 > Reporting shows the **period total + $/day** (no forced annualization).
 
+> **Known limitation — per-window step thresholds.** When a plan combines a
+> *free window* with a *step tariff* whose threshold applies outside that
+> window (e.g. GloBird FOUR4FREE: 4 h free midday + a "first 15 kWh/day"
+> off-peak step), the engine currently tracks **one global daily kWh total**
+> that free-window usage also increments. Free midday kWh can therefore eat
+> the off-peak step's first-tier allowance and rerate off-peak usage to the
+> pricier tier — observed over-bill ≈ $0.11/day on a reproducing profile.
+> Real-world impact: any plan with a free window **and** a step tariff whose
+> threshold sits outside that window can be mildly over-costed, which can in
+> turn flip plan ranking. Tracked by an `xfail(strict=True)` test in
+> `tests/core/test_calculator.py`
+> (`test_free_window_consumption_should_not_consume_step_threshold`); the fix
+> requires per-window cumulative counters in `core/simulation/calculator.py`.
+
 ---
 
 ## Plan JSON format
@@ -163,7 +177,9 @@ python -m pytest tests/ -v
 The test suite runs fully offline — no API keys, no real browser.
 
 ```
-tests/core/     — NEM12 parsing, ingestion, tariff schema, cost calculator, elasticity, period selection
+tests/core/     — NEM12 parsing, ingestion, tariff schema, cost calculator, elasticity, period selection,
+                  comparison engine (test_report.py), JSON loader round-trip + upsert (test_loader.py),
+                  and a strict-xfail pin on the per-window-step-threshold bug (test_calculator.py)
 tests/agent/    — plan extractor + orchestrator loop (mock/scripted LLM provider, no browser)
 ```
 
