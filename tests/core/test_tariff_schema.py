@@ -96,10 +96,16 @@ def test_step_tariff_unknown_tier_raises():
 
 def test_load_all_sample_plans():
     # data/plans/ is the shared store for bundled samples AND extracted real
-    # plans (e.g. globird_*), so scope the count to sample_ files only.
+    # plans (e.g. globird_*), so scope to sample_ files only.
+    # Checking for known plan IDs rather than pinning the total count means
+    # adding a new sample plan does not break this test.
     sample_files = sorted(PLANS_DIR.glob("sample_*.json"))
     plans = [load_plan(p) for p in sample_files]
-    assert len(plans) == 3, f"Expected 3 sample plans, got {len(plans)}"
+    actual_ids = {p.plan_id for p in plans}
+    known_ids = {"sample_flat_rate", "sample_smart_rate", "sample_tou"}
+    assert known_ids.issubset(actual_ids), (
+        f"Missing expected sample plan IDs: {known_ids - actual_ids}"
+    )
 
 
 def test_sample_plans_have_unique_ids():

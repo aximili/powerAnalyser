@@ -568,6 +568,44 @@ def test_available_month_days_filtered_by_year():
     assert (6, 1) in only_2025 and (7, 1) not in only_2025
 
 
+def test_three_year_averaging_mean_and_period_days():
+    """Three-year average is the arithmetic mean of all three years.
+
+    Every existing multi-year test uses exactly 2 years. This test ensures
+    the ``np.nanmean`` path inside ``_average`` scales correctly to 3 years
+    (mean of 1.0, 2.0, 3.0 = 2.0, not 1.5 or 2.5) and that ``period_days``
+    reflects the number of unique calendar days in the output (1), not the
+    total number of input years (3).
+
+    Hand-verification:
+      np.nanmean([[1.0]*48, [2.0]*48, [3.0]*48], axis=0) = [2.0]*48.
+      Output timestamps come from earliest year (2024), so 1 unique date.
+    """
+    by_date = {
+        datetime.date(2024, 6, 1): [1.0] * 48,  # Year 1
+        datetime.date(2025, 6, 1): [2.0] * 48,  # Year 2
+        datetime.date(2026, 6, 1): [3.0] * 48,  # Year 3
+    }
+    meter = _make_meter(by_date)
+
+    res = select_period(meter, (6, 1), (6, 1))  # years=None → average all
+
+    assert res.averaged is True
+    assert res.years_used == [2024, 2025, 2026]
+
+    # period_days must be 1 (one unique calendar date in the output),
+    # not 3 (which would indicate the input days were stacked rather than averaged).
+    assert res.period_days == 1, (
+        f"period_days should be 1 (one unique calendar date), got {res.period_days}"
+    )
+
+    # Mean of 1.0, 2.0, 3.0 = 2.0 — not 1.5 (2-yr mean of years 1+2) or 2.5
+    assert res.meter.e1["kwh"].iloc[0] == pytest.approx(2.0, abs=1e-9), (
+        f"Mean of [1.0, 2.0, 3.0] must be 2.0, got {res.meter.e1['kwh'].iloc[0]}"
+    )
+    assert res.meter.e1["kwh"].sum() == pytest.approx(2.0 * 48, abs=1e-9)
+
+
 def test_select_period_resolution_fields_populated():
     by_date = {
         datetime.date(2025, 6, 1): [1.0] * 48,

@@ -19,6 +19,8 @@ from power_analyser.core.tariff.schema import ElectricityPlan
 
 MELBOURNE_TZ = "Australia/Melbourne"
 
+from power_analyser.core.simulation.calculator import _day_of_week
+
 
 def _make_meter(date: datetime.date, e1_values: list[float], b1_values: list[float] | None = None) -> MeterDataSet:
     """Build a single-day MeterDataSet for testing."""
@@ -1166,3 +1168,194 @@ def test_two_step_tariff_interval_straddles_second_threshold():
     )
     assert result.total_usage == expected_usage
     assert result.total_usage == Decimal("0.86")
+
+
+# ── Locale-independent _day_of_week ───────────────────────────────────────────
+
+
+def test_day_of_week_basic():
+    """_day_of_week returns the correct 3-letter abbreviation for Mon, Sat, Sun."""
+    ts_mon = pd.Timestamp("2024-06-03", tz=MELBOURNE_TZ)   # Monday
+    ts_sat = pd.Timestamp("2024-06-08", tz=MELBOURNE_TZ)   # Saturday
+    ts_sun = pd.Timestamp("2024-06-09", tz=MELBOURNE_TZ)   # Sunday
+
+    assert _day_of_week(ts_mon) == "Mon"
+    assert _day_of_week(ts_sat) == "Sat"
+    assert _day_of_week(ts_sun) == "Sun"
+
+
+def test_day_of_week_never_calls_strftime(monkeypatch):
+    """_day_of_week must not call pd.Timestamp.strftime (locale-dependent).
+
+    Monkeypatching strftime to raise proves the implementation relies only on
+    ``pd.Timestamp.weekday()`` (an integer, unaffected by LC_TIME). If the
+    production code ever reverts to strftime this test will fail.
+    """
+    def raising_strftime(self, *args, **kwargs):
+        raise RuntimeError(
+            "_day_of_week must not call strftime — it is locale-dependent"
+        )
+
+    monkeypatch.setattr(pd.Timestamp, "strftime", raising_strftime)
+
+    ts = pd.Timestamp("2024-06-03", tz=MELBOURNE_TZ)  # Monday
+    result = _day_of_week(ts)
+    assert result == "Mon", f"Expected 'Mon', got {result!r}"
+
+
+def test_day_of_week_locale_independent():
+    """With fr_FR.UTF-8 locale, _day_of_week still returns 'Mon', not 'Lun'.
+
+    Skipped when the French locale is not installed on the test host.
+    The strftime-patching test (above) covers the same invariant on every host.
+    """
+    import locale
+
+    try:
+        saved = locale.setlocale(locale.LC_TIME)
+        locale.setlocale(locale.LC_TIME, "fr_FR.UTF-8")
+    except locale.Error:
+        pytest.skip("fr_FR.UTF-8 locale not available on this system")
+
+    try:
+        ts = pd.Timestamp("2024-06-03", tz=MELBOURNE_TZ)  # Monday
+        result = _day_of_week(ts)
+        assert result == "Mon", (
+            f"Expected 'Mon' with fr_FR locale (locale-independent), got {result!r}. "
+            "Ensure _day_of_week uses weekday(), not strftime."
+        )
+    finally:
+        locale.setlocale(locale.LC_TIME, saved)
+
+
+# ── Cross-DST step tariff ─────────────────────────────────────────────────────
+
+
+def test_dst_fall_back_step_tariff_threshold_crossed():
+    """Fall-back day (50 intervals): extra kWh from the repeated hour crosses the step threshold.
+
+    On a normal 48-interval day, 48 × 0.1 kWh = 4.8 kWh stays below the
+    4.85 kWh/day threshold (all intervals billed at Low $0.20).
+
+    On the fall-back day (50 intervals), the 49th interval (index 48)
+    straddles the threshold:
+      below_kwh = 4.85 - 4.80 = 0.05 kWh @ Low  $0.20 = $0.010
+      above_kwh = 0.10 - 0.05 = 0.05 kWh @ High $0.40 = $0.020
+    The 50th interval (index 49) is already above the threshold:
+      0.10 kWh @ High $0.40 = $0.040
+
+    Hand-math:
+      48 intervals × 0.1 × $0.20  =  $0.960   (below threshold)
+      split interval (straddled)   =  $0.030   ($0.010 + $0.020)
+      50th interval already_above  =  $0.040
+      total_usage                  =  $1.030
+      supply                       =  $1.00
+      total_net                    =  $2.030
+
+    Contrast: a normal 48-interval day produces 4.8 kWh < 4.85 → all Low,
+    total_usage = $0.960, confirming that only the extra fall-back intervals
+    push consumption over the threshold.
+    """
+    plan = ElectricityPlan.model_validate({
+        "plan_id": "test_dst_step",
+        "retailer": "Test Retailer",
+        "plan_name": "DST Step Tariff",
+        "daily_supply_charge": "1.00",
+        "usage_tiers": [
+            {"name": "Low",  "rate": "0.20", "schedule": []},
+            {"name": "High", "rate": "0.40", "schedule": []},
+        ],
+        "step_tariffs": [
+            {"threshold_kwh_per_day": 4.85, "tier_below": "Low", "tier_above": "High"}
+        ],
+    })
+
+    # Fall-back day 2024-04-07 AEDT→AEST: 50 intervals (the 02:00-02:30 hour
+    # repeats at UTC+11 then UTC+10).
+    idx = pd.date_range("2024-04-07 00:00", "2024-04-07 23:30", freq="30min", tz=MELBOURNE_TZ)
+    assert len(idx) == 50, "Precondition: fall-back day must have 50 intervals"
+    meter = _meter_from_index(idx, [0.1] * 50)
+
+    result = CostCalculator().calculate_period(meter, plan)
+
+    # 48 full intervals below threshold: 48 × 0.1 × $0.20
+    # Interval 49 (index 48) straddles 4.85: 0.05 @ Low + 0.05 @ High
+    # Interval 50 (index 49) already above:  0.1 @ High
+    expected_usage = (
+        Decimal("48") * Decimal("0.1") * Decimal("0.20")   # $0.960
+        + Decimal("0.05") * Decimal("0.20")                 # $0.010  (below split)
+        + Decimal("0.05") * Decimal("0.40")                 # $0.020  (above split)
+        + Decimal("0.1") * Decimal("0.40")                  # $0.040  (already_above)
+    )
+    assert result.total_usage == expected_usage
+    assert result.total_usage == Decimal("1.030")
+    assert result.total_supply == Decimal("1.00")
+    assert result.total_net == Decimal("2.030")
+
+    # Contrast: normal 48-interval day stays entirely below the threshold
+    normal_date = datetime.date(2024, 4, 1)  # a regular non-DST Tuesday
+    normal_meter = _make_meter(normal_date, [0.1] * 48)
+    normal_result = CostCalculator().calculate_period(normal_meter, plan)
+    assert normal_result.total_usage == Decimal("48") * Decimal("0.1") * Decimal("0.20")
+    assert normal_result.total_usage == Decimal("0.960"), (
+        "Normal 48-interval day must stay below threshold (4.8 < 4.85)"
+    )
+
+
+# ── Negative net cost ─────────────────────────────────────────────────────────
+
+
+def test_negative_net_cost_high_solar_export():
+    """Solar FiT credit exceeds supply + usage → DailyCost.net and total_net are negative.
+
+    A high-export day on a generous FiT rate can produce a negative net
+    cost. The calculator must NOT clamp to zero.
+
+    Plan:
+      - Supply charge: $0.50/day
+      - Flat usage:    $0.30/kWh
+      - FiT credit:    $0.12/kWh (exported)
+
+    Day: Mon 2024-06-03, 48 intervals.
+      E1 (import): 48 × 0.1 kWh = 4.8 kWh
+      B1 (export): 48 × 0.5 kWh = 24.0 kWh
+
+    Hand-math:
+      supply =  $0.50
+      usage  =  4.8  × $0.30 = $1.44
+      credit =  24.0 × $0.12 = $2.88
+      net    =  $0.50 + $1.44 − $2.88 = −$0.94  ← must be negative
+    """
+    plan = ElectricityPlan.model_validate({
+        "plan_id": "test_neg_net",
+        "retailer": "Test Retailer",
+        "plan_name": "High Export FiT",
+        "daily_supply_charge": "0.50",
+        "usage_tiers": [{"name": "Flat", "rate": "0.30", "schedule": []}],
+        "fit_tiers": [{"name": "FiT", "rate": "0.12", "schedule": []}],
+    })
+
+    date = datetime.date(2024, 6, 3)
+    meter = _make_meter(date, e1_values=[0.1] * 48, b1_values=[0.5] * 48)
+
+    result = CostCalculator().calculate_period(meter, plan)
+
+    expected_supply = Decimal("0.50")
+    expected_usage  = Decimal("4.8") * Decimal("0.30")   # = Decimal("1.440")
+    expected_credit = Decimal("24.0") * Decimal("0.12")  # = Decimal("2.880")
+    expected_net    = expected_supply + expected_usage - expected_credit  # = −0.940
+
+    assert result.total_supply == expected_supply
+    assert result.total_usage == expected_usage
+    assert result.total_solar_credit == expected_credit
+    assert result.total_net == expected_net
+    assert result.total_net < Decimal("0"), (
+        f"total_net must be negative on a high-export day; got {result.total_net}"
+    )
+
+    # Per-day DailyCost.net must also be negative (not clamped to zero)
+    assert len(result.daily_costs) == 1
+    assert result.daily_costs[0].net < Decimal("0"), (
+        f"DailyCost.net must be negative; got {result.daily_costs[0].net}"
+    )
+    assert result.daily_costs[0].net == expected_net
