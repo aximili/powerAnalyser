@@ -160,6 +160,33 @@ def test_save_plan_preserves_decimal_as_string(tmp_path, flat_rate_plan_dict):
     assert '"rate": "0.30"' in raw
 
 
+# ── Fix 5: StepTariff tier_below == tier_above validation (L2) ───────────────
+
+
+def test_step_tariff_same_tier_above_and_below_raises():
+    """A StepTariff where tier_below == tier_above must raise a ValidationError.
+
+    Such a configuration is a silent no-op: the step has no effect because both
+    sides bill at the same rate. The validator surfaces this misconfiguration at
+    load time so it never reaches the calculator.
+
+    Hand-verification:
+      tier_below = tier_above = "Standard" → validator raises ValueError
+      Pydantic wraps it as ValidationError.
+    """
+    with pytest.raises(ValidationError):
+        ElectricityPlan.model_validate({
+            "plan_id": "x",
+            "retailer": "R",
+            "plan_name": "Same-tier step",
+            "daily_supply_charge": "1.0",
+            "usage_tiers": [{"name": "Standard", "rate": "0.30", "schedule": []}],
+            "step_tariffs": [
+                {"threshold_kwh_per_day": 10.0, "tier_below": "Standard", "tier_above": "Standard"}
+            ],
+        })
+
+
 def test_save_plan_defaults_to_configured_data_dir(tmp_path, monkeypatch, flat_rate_plan_dict):
     """With no directory given, save_plan writes to <data_dir>/plans/."""
     from power_analyser import config as cfg_module

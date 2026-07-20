@@ -481,3 +481,52 @@ def test_select_period_resolution_fields_populated():
     assert res.effective_end_md == (6, 1)
     assert res.notes  # non-empty averaging note
     assert res.meter.start_date == datetime.date(2025, 6, 1)  # reference = earliest year
+
+
+# ── Fix 4: interior gap detection in build_clamp_message (M4) ────────────────
+
+
+def test_build_clamp_message_interior_gap_detected():
+    """A gap in the middle of a window (endpoints present) produces a non-None
+    message that mentions the gap count.
+
+    Window: Jun 1–5. Data present for Jun 1, 2, 5 only.
+    Jun 3 and Jun 4 are interior gaps — neither leading nor trailing missing.
+
+    Hand-verification:
+      window = [(6,1),(6,2),(6,3),(6,4),(6,5)]
+      avail  = {(6,1),(6,2),(6,5)}
+      first = (6,1), last = (6,5)  → start_missing=False, end_missing=False
+      interior = window[1:4] = [(6,2),(6,3),(6,4)]
+      interior_missing_count = 2  (Jun 3 and Jun 4)
+      Expected: non-None message containing "2" and "missing".
+    """
+    window = target_calendar_dates((6, 1), (6, 5))
+    avail = {(6, 1), (6, 2), (6, 5)}  # Jun 3 and Jun 4 absent (interior gaps)
+    msg = build_clamp_message(window, avail)
+    assert msg is not None, "Interior gap must produce a non-None clamp message"
+    assert "2" in msg, f"Message should mention 2 missing days; got: {msg!r}"
+    assert "missing" in msg.lower(), f"Message should contain 'missing'; got: {msg!r}"
+
+
+def test_build_clamp_message_interior_gap_added_to_end_trim_message():
+    """When there is both a trailing gap and an interior gap, the message mentions both.
+
+    Window: Jun 1–5. Data for Jun 1, 2, 3 only (Jun 4 and 5 trailing missing).
+    Separately, Jun 2 is also absent — making Jun 2 an interior gap.
+
+    Hand-verification:
+      avail = {(6,1),(6,3)}
+      first=(6,1), last=(6,3), first_idx=0, last_idx=2
+      start_missing=False, end_missing=True (Jun 4,5 missing)
+      interior_count = 1  (Jun 2 missing, between Jun 1 and Jun 3)
+      Expected: message starts with the standard end-trim phrasing and appends
+                "Also, 1 day(s) missing within the selected period."
+    """
+    window = target_calendar_dates((6, 1), (6, 5))
+    avail = {(6, 1), (6, 3)}   # Jun 2 (interior) and Jun 4,5 (trailing) absent
+    msg = build_clamp_message(window, avail)
+    assert msg is not None
+    assert "Trim the end" in msg
+    assert "1" in msg
+    assert "missing" in msg.lower()

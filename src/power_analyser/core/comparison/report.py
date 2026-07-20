@@ -18,6 +18,7 @@ Usage (CLI smoke-test):
 from __future__ import annotations
 
 import argparse
+import datetime
 import sys
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -87,6 +88,7 @@ class ComparisonEngine:
         simulator = LoadShiftSimulator()
         configs = elasticity_configs or {}
         entries: list[ComparisonEntry] = []
+        all_warnings: list[str] = list(meter.warnings)
 
         for plan in plans:
             baseline: PeriodResult = calculator.calculate_period(meter, plan)
@@ -120,13 +122,36 @@ class ComparisonEngine:
                 )
             )
 
+            # Warn when the analysis period falls wholly outside the plan's validity window.
+            # Parse defensively — a malformed date string is silently ignored.
+            try:
+                if plan.valid_to is not None:
+                    valid_to = datetime.date.fromisoformat(plan.valid_to)
+                    if valid_to < meter.start_date:
+                        all_warnings.append(
+                            f"Plan '{plan.plan_name}' (valid_to {plan.valid_to}) expired "
+                            f"before the analysis period starts ({meter.start_date})."
+                        )
+            except ValueError:
+                pass
+            try:
+                if plan.valid_from is not None:
+                    valid_from = datetime.date.fromisoformat(plan.valid_from)
+                    if valid_from > meter.end_date:
+                        all_warnings.append(
+                            f"Plan '{plan.plan_name}' (valid_from {plan.valid_from}) is not yet "
+                            f"valid at the end of the analysis period ({meter.end_date})."
+                        )
+            except ValueError:
+                pass
+
         ranked = sorted(entries, key=lambda e: e.simulated_net if e.simulated_net is not None else e.baseline_net)
 
         period_days = len(set(meter.e1.index.date)) if not meter.e1.empty else 0
 
         return ComparisonResult(
             ranked=ranked,
-            warnings=list(meter.warnings),
+            warnings=all_warnings,
             period_days=period_days,
             nmi=meter.nmi,
         )

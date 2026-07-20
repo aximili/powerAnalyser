@@ -306,3 +306,81 @@ def test_tz_localize_failure_raises_runtime_error(tmp_path, monkeypatch):
     assert "2024-06-01" in full_msg
     assert "injected tz failure" in full_msg
 
+
+# ── Fix 1: DST detection generalised to 15-min intervals (H3) ────────────────
+
+
+def test_15min_spring_forward_interpolates_to_96_intervals_and_warns(tmp_path):
+    """A 15-min NEM12 file with 92 intervals on spring-forward day must be padded
+    to 96 (not 48) via the generalised DST logic, with a warning emitted.
+
+    Hand-verification:
+      interval_length_min = 15  → n_expected = 1440//15 = 96
+      dst_delta = 60//15 = 4  (one DST hour = 4 quarter-hour slots)
+      spring-forward: 96 - 4 = 92 raw intervals  → interpolated to 96.
+    """
+    def line300(datestr, n):
+        return "300," + datestr + "," + ",".join("0.1" for _ in range(n)) + ",A,,,"
+
+    csv = "\n".join([
+        "100,NEM12,6408088506",
+        "200,6408088506,B1E1,E1,E1,,1217287,KWH,15,",   # 15-min intervals
+        line300("20241006", 92),                          # spring-forward: 96 - 4 = 92
+        "900",
+    ]) + "\n"
+    path = tmp_path / "fifteen_min_dst.csv"
+    path.write_text(csv, encoding="utf-8")
+
+    meter = IngestionPipeline().load(path)
+
+    dst_date = datetime.date(2024, 10, 6)
+    rows = meter.e1[meter.e1.index.date == dst_date]
+    # After interpolation the pipeline builds a 96-slot array, then tz_localize shifts
+    # the four 02:xx slots to 03:xx (which already exist), so dedup removes 4 →
+    # 92 final intervals.  This matches the 30-min pattern: 46 raw → 48 array → 46 final.
+    assert len(rows) == 92, f"Expected 92 intervals after DST fix, got {len(rows)}"
+
+    # The critical check: the DST branch must have fired (not the generic pad-at-end path),
+    # proven by the presence of a spring-forward warning.
+    dst_warnings = [w for w in meter.warnings if "spring-forward" in w.lower()]
+    assert dst_warnings, "Expected a DST spring-forward warning for 15-min file"
+
+
+# ── Fix 2: Multi-NMI B1 mismatch warns and drops foreign data (H6) ──────────
+
+
+def test_multi_nmi_b1_mismatch_warns_and_drops_foreign_data(tmp_path):
+    """B1 records from a different NMI must trigger a warning and be dropped.
+
+    A NEM12 file containing E1 for NMI_A and B1 for NMI_B (two separate meters)
+    must NOT silently credit FiT from NMI_B against NMI_A's usage. Instead the
+    pipeline must warn and return an empty B1 DataFrame.
+
+    Hand-verification:
+      e1_records NMI: NMI_A  ← primary
+      b1_records NMI: NMI_B  ← foreign, must be dropped
+      After fix: meter.b1.empty == True; one warning naming the mismatch.
+    """
+    def line300(datestr, n, val="0.1"):
+        return "300," + datestr + "," + ",".join(val for _ in range(n)) + ",A,,,"
+
+    csv = "\n".join([
+        "100,NEM12,6408088506",
+        "200,NMI_A,B1E1,E1,E1,,METER_A,KWH,30,",
+        line300("20240601", 48),
+        "200,NMI_B,B1E1,B1,B1,,METER_B,KWH,30,",   # B1 from a different meter
+        line300("20240601", 48, "0.05"),
+        "900",
+    ]) + "\n"
+    path = tmp_path / "multi_nmi.csv"
+    path.write_text(csv, encoding="utf-8")
+
+    meter = IngestionPipeline().load(path)
+
+    assert meter.b1.empty, "Foreign B1 data must be dropped"
+    assert meter.nmi == "NMI_A"
+
+    mismatch_warnings = [w for w in meter.warnings if "mismatch" in w.lower()]
+    assert mismatch_warnings, "Expected a NMI mismatch warning"
+    assert "NMI_B" in mismatch_warnings[0]
+

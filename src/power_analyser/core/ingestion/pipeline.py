@@ -67,10 +67,28 @@ class IngestionPipeline:
         if not e1_records:
             raise ValueError(f"No E1 (consumption) stream found in {path}")
 
-        # Use the first NMI found as the primary identifier
+        # Validate NMI consistency in the E1 stream
+        e1_nmis = {r.nmi for r in e1_records}
+        if len(e1_nmis) > 1:
+            raise ValueError(
+                f"E1 stream spans multiple NMIs {sorted(e1_nmis)}. "
+                "Each NMI must be loaded from its own NEM12 file."
+            )
+
         nmi = e1_records[0].nmi
 
         all_warnings: list[str] = []
+
+        # Validate B1 NMI matches primary E1 NMI; drop foreign records and warn
+        if b1_records:
+            mismatched_b1 = [r for r in b1_records if r.nmi != nmi]
+            if mismatched_b1:
+                foreign_nmis = sorted({r.nmi for r in mismatched_b1})
+                all_warnings.append(
+                    f"B1 stream NMI mismatch: expected '{nmi}' but found {foreign_nmis}. "
+                    "Mismatched B1 data dropped — FiT credits not applied for foreign meter."
+                )
+                b1_records = [r for r in b1_records if r.nmi == nmi]
 
         e1_df, w = _records_to_dataframe(e1_records, E1_SUFFIX)
         all_warnings.extend(w)
@@ -161,33 +179,34 @@ def _block_to_series(
     """
     n_expected = 1440 // interval_min
     n_actual = len(block.intervals)
+    dst_delta = 60 // interval_min   # intervals in one DST hour (2 for 30-min, 4 for 15-min)
+    missing_pos = 2 * dst_delta      # 0-based index of the 02:00 slot
     warnings: list[str] = []
     intervals = list(block.intervals)
 
-    if n_actual == n_expected - 2:
-        # Spring-forward: 2 intervals missing around 02:00 local time
-        # Interpolate as the average of immediate neighbours at position 4
-        missing_pos = 4  # 0-based: 0*30min=00:00, …, 4*30min=02:00
+    if n_actual == n_expected - dst_delta:
+        # Spring-forward: dst_delta intervals missing around 02:00 local time.
+        # Interpolate all missing slots as the average of the immediate neighbours.
         left = intervals[missing_pos - 1] if missing_pos > 0 else 0.0
         right = intervals[missing_pos] if missing_pos < len(intervals) else 0.0
         fill = (left + right) / 2
-        intervals.insert(missing_pos, fill)
-        intervals.insert(missing_pos + 1, fill)
+        intervals = intervals[:missing_pos] + [fill] * dst_delta + intervals[missing_pos:]
         warnings.append(
             f"{block.date} ({block.suffix}): DST spring-forward — "
-            f"{n_actual} intervals found; interpolated 2 missing intervals at 02:00–02:30."
+            f"{n_actual} intervals found; interpolated {dst_delta} missing intervals at 02:00."
         )
 
-    elif n_actual == n_expected + 2:
-        # Fall-back: 02:00 and 02:30 each appear twice (AEDT then AEST)
-        # Sum the paired readings to preserve total energy
-        dup = 4  # position of the first duplicate pair
-        merged_1 = intervals[dup] + intervals[dup + 2]
-        merged_2 = intervals[dup + 1] + intervals[dup + 3]
-        intervals = intervals[:dup] + [merged_1, merged_2] + intervals[dup + 4:]
+    elif n_actual == n_expected + dst_delta:
+        # Fall-back: the one-hour DST window (02:00 through 02:00+dst_delta-1 slots)
+        # appears twice (AEDT then AEST). Sum each pair to preserve total energy.
+        merged = [
+            intervals[missing_pos + i] + intervals[missing_pos + dst_delta + i]
+            for i in range(dst_delta)
+        ]
+        intervals = intervals[:missing_pos] + merged + intervals[missing_pos + 2 * dst_delta:]
         warnings.append(
             f"{block.date} ({block.suffix}): DST fall-back — "
-            f"{n_actual} intervals found; aggregated duplicate 02:00–02:30 intervals."
+            f"{n_actual} intervals found; aggregated duplicate 02:00 intervals."
         )
 
     elif n_actual != n_expected:

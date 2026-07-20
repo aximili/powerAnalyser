@@ -126,6 +126,15 @@ class StepTariff(BaseModel):
     tier_below: str = Field(description="UsageTier.name for consumption below the threshold")
     tier_above: str = Field(description="UsageTier.name for consumption above the threshold")
 
+    @model_validator(mode="after")
+    def _validate_tiers_differ(self) -> "StepTariff":
+        if self.tier_below == self.tier_above:
+            raise ValueError(
+                f"StepTariff tier_below and tier_above must differ; both are '{self.tier_below}'. "
+                "A step where both sides use the same tier has no effect."
+            )
+        return self
+
 
 class ElectricityPlan(BaseModel):
     """Top-level model representing one retail electricity offer.

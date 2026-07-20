@@ -475,3 +475,83 @@ def test_result_component_fields_are_decimal():
     # No elasticity → simulated fields stay None.
     assert entry.simulated_net is None
     assert entry.shift_saving is None
+
+
+# ── Fix 3: valid_from / valid_to enforcement (M5) ────────────────────────────
+
+
+def test_comparison_warns_when_plan_expired_before_meter_period():
+    """A plan whose valid_to is before the meter's start_date generates a warning.
+
+    The plan is still ranked (not dropped) — the warning is informational only.
+
+    Hand-verification:
+      meter date: 2024-06-03  (a Monday)
+      plan valid_to: 2020-01-01  → expired 4+ years before the meter data.
+      Expected: ComparisonResult.warnings contains a message naming the plan
+                and referencing valid_to or "expired".
+    """
+    plan = ElectricityPlan.model_validate({
+        "plan_id": "expired_plan",
+        "retailer": "Test Retailer",
+        "plan_name": "Expired Plan",
+        "valid_to": "2020-01-01",
+        "daily_supply_charge": "1.00",
+        "usage_tiers": [{"name": "Flat", "rate": "0.20", "schedule": []}],
+    })
+    date = datetime.date(2024, 6, 3)
+    meter = _make_meter(date, [0.5] * 48)
+
+    result = ComparisonEngine().compare(meter, [plan])
+
+    # Plan is still ranked
+    assert len(result.ranked) == 1
+
+    validity_warnings = [
+        w for w in result.warnings
+        if "expired" in w.lower() or "valid_to" in w
+    ]
+    assert validity_warnings, "Expected a validity warning for an expired plan"
+    assert "Expired Plan" in validity_warnings[0]
+
+
+def test_comparison_no_warning_for_current_plan():
+    """A plan whose valid_to is after the meter end date produces no validity warning."""
+    plan = ElectricityPlan.model_validate({
+        "plan_id": "current",
+        "retailer": "Test Retailer",
+        "plan_name": "Current Plan",
+        "valid_from": "2024-01-01",
+        "valid_to": "2025-12-31",
+        "daily_supply_charge": "1.00",
+        "usage_tiers": [{"name": "Flat", "rate": "0.20", "schedule": []}],
+    })
+    date = datetime.date(2024, 6, 3)
+    meter = _make_meter(date, [0.5] * 48)
+
+    result = ComparisonEngine().compare(meter, [plan])
+
+    validity_warnings = [
+        w for w in result.warnings
+        if "expired" in w.lower() or "valid_to" in w or "valid_from" in w
+    ]
+    assert not validity_warnings, f"Unexpected validity warning: {validity_warnings}"
+
+
+def test_comparison_ignores_malformed_validity_date():
+    """A malformed valid_to string must not crash the comparison — it is silently skipped."""
+    plan = ElectricityPlan.model_validate({
+        "plan_id": "baddate",
+        "retailer": "Test Retailer",
+        "plan_name": "Bad Date Plan",
+        "valid_to": "not-a-date",
+        "daily_supply_charge": "1.00",
+        "usage_tiers": [{"name": "Flat", "rate": "0.20", "schedule": []}],
+    })
+    date = datetime.date(2024, 6, 3)
+    meter = _make_meter(date, [0.5] * 48)
+
+    result = ComparisonEngine().compare(meter, [plan])
+
+    # Must not raise; plan is still ranked normally
+    assert len(result.ranked) == 1

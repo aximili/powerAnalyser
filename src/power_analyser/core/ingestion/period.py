@@ -148,27 +148,40 @@ def build_clamp_message(
 
     first = present[0]
     last = present[-1]
-    start_missing = any(md in missing for md in window[: window.index(first)])
-    end_missing = any(md in missing for md in window[window.index(last) + 1 :])
+    first_idx = window.index(first)
+    last_idx = window.index(last)
+    start_missing = any(md in missing for md in window[:first_idx])
+    end_missing = any(md in missing for md in window[last_idx + 1:])
+
+    interior_count = sum(1 for md in window[first_idx + 1:last_idx] if md in missing)
+    gap_note = (
+        f" Also, {interior_count} day(s) missing within the selected period."
+        if interior_count else ""
+    )
 
     if start_missing and end_missing:
         return (
             f"Part of your selected period has no data "
             f"(available {_fmt(first)}–{_fmt(last)}). "
             f"Trim to {_fmt(first)}–{_fmt(last)}?"
+            + gap_note
         )
     if start_missing:
         return (
             f"Part of your selected period has no data "
             f"(earliest available is {_fmt(first)}). "
             f"Trim the start to {_fmt(first)}?"
+            + gap_note
         )
-    # end_missing only
-    return (
-        f"Part of your selected period has no data "
-        f"(latest available is {_fmt(last)}). "
-        f"Trim the end to {_fmt(last)}?"
-    )
+    if end_missing:
+        return (
+            f"Part of your selected period has no data "
+            f"(latest available is {_fmt(last)}). "
+            f"Trim the end to {_fmt(last)}?"
+            + gap_note
+        )
+    # Interior gaps only — leading and trailing dates both present
+    return f"{interior_count} day(s) missing within the selected period."
 
 
 # ── Core selection + averaging ────────────────────────────────────────────────
