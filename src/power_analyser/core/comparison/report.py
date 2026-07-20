@@ -24,11 +24,12 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
 
+from ..ingestion.period import PeriodResolution
 from ..ingestion.pipeline import IngestionPipeline, MeterDataSet
 from ..simulation.calculator import CostCalculator, PeriodResult
 from ..simulation.elasticity import ElasticityConfig, LoadShiftSimulator
 from ..tariff.loader import load_plans_dir
-from ..tariff.schema import ElectricityPlan
+from ..tariff.schema import ALL_DAYS, ElectricityPlan
 
 
 @dataclass
@@ -67,6 +68,19 @@ class ComparisonResult:
     nmi: str
 
 
+def _has_weekday_sensitive_rates(plan: ElectricityPlan, all_days_set: set) -> bool:
+    """True if any usage tier or free window restricts to a subset of the week."""
+    for tier in plan.usage_tiers:
+        for tr in tier.schedule:
+            if set(tr.days) != all_days_set:
+                return True
+    for fw in plan.free_windows:
+        for tr in fw.schedule:
+            if set(tr.days) != all_days_set:
+                return True
+    return False
+
+
 class ComparisonEngine:
     """Orchestrates the full comparison pipeline."""
 
@@ -75,11 +89,15 @@ class ComparisonEngine:
         meter: MeterDataSet,
         plans: list[ElectricityPlan],
         elasticity_configs: dict[str, ElasticityConfig] | None = None,
+        resolution: PeriodResolution | None = None,
     ) -> ComparisonResult:
         """Run all plans against the meter data and return a ranked result.
 
         ``elasticity_configs`` maps plan_id → ElasticityConfig.  Plans not
         present in the dict are compared using baseline data only.
+        ``resolution`` is the output of ``select_period``; when supplied and
+        multi-year averaging was used, a warning is emitted for plans with
+        weekday-specific rates.
         """
         if not plans:
             raise ValueError("At least one plan is required for comparison.")
@@ -144,6 +162,16 @@ class ComparisonEngine:
                         )
             except ValueError:
                 pass
+
+        # Warn once when multi-year averaging meets weekday-sensitive rates (C5).
+        if resolution is not None and len(resolution.years_used) > 1:
+            all_days_set = set(ALL_DAYS)
+            if any(_has_weekday_sensitive_rates(p, all_days_set) for p in plans):
+                all_warnings.append(
+                    "Multi-year averaging was used with one or more plans that have "
+                    "weekday-specific rates. Costs may be slightly smoothed across "
+                    "weekday/weekend boundaries. For best accuracy, select a single year."
+                )
 
         ranked = sorted(entries, key=lambda e: e.simulated_net if e.simulated_net is not None else e.baseline_net)
 

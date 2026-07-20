@@ -120,7 +120,9 @@ window with no overlap at all is a hard error.
 > cost"). Because weekdays differ across years for the same calendar date,
 > weekday-specific ToU / free-window plans are *slightly smoothed* under
 > multi-year averaging. Flat, step, and 7-day-free-window plans are exact.
-> Reporting shows the **period total + $/day** (no forced annualization).
+> When a weekday-sensitive plan is compared against multi-year averaged data,
+> a warning appears in the results. Reporting shows the **period total + $/day**
+> (no forced annualization).
 
 ---
 

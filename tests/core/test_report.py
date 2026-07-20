@@ -20,6 +20,7 @@ import pandas as pd
 import pytest
 
 from power_analyser.core.comparison.report import ComparisonEngine, ComparisonResult
+from power_analyser.core.ingestion.period import PeriodResolution
 from power_analyser.core.ingestion.pipeline import MeterDataSet
 from power_analyser.core.simulation.elasticity import ElasticityConfig, SourceWindow
 from power_analyser.core.tariff.schema import ElectricityPlan, TimeRange
@@ -555,3 +556,93 @@ def test_comparison_ignores_malformed_validity_date():
 
     # Must not raise; plan is still ranked normally
     assert len(result.ranked) == 1
+
+
+# ── Fix C5: weekday-averaging warning ────────────────────────────────────────
+
+
+def _make_two_year_resolution(meter: MeterDataSet) -> PeriodResolution:
+    """Synthetic PeriodResolution representing a two-year average."""
+    dates = sorted(set(meter.e1.index.date))
+    start_date = dates[0]
+    end_date = dates[-1]
+    return PeriodResolution(
+        meter=meter,
+        period_days=len(set(dates)),
+        effective_start_md=(start_date.month, start_date.day),
+        effective_end_md=(end_date.month, end_date.day),
+        averaged=True,
+        years_used=[2024, 2025],
+    )
+
+
+def test_weekday_averaging_warning_with_tou_plan():
+    """Multi-year averaging + weekday-ToU plan → exactly one weekday warning.
+
+    When select_period averaged over two years AND at least one plan has a
+    usage tier whose schedule covers only weekdays (not all 7 days), the engine
+    must append the weekday-smoothing warning to ComparisonResult.warnings.
+
+    Hand-verification:
+      resolution.years_used = [2024, 2025]  (len > 1 → multi-year)
+      plan has Peak tier restricted to Mon-Fri (5 days ≠ ALL_DAYS)
+      → _has_weekday_sensitive_rates returns True
+      → warning appended exactly once.
+    """
+    date = datetime.date(2024, 6, 3)
+    meter = _make_meter(date, [0.5] * 48)
+    resolution = _make_two_year_resolution(meter)
+
+    plan = ElectricityPlan.model_validate({
+        "plan_id": "tou_weekday",
+        "retailer": "Test Retailer",
+        "plan_name": "ToU Weekday",
+        "daily_supply_charge": "1.00",
+        "usage_tiers": [
+            {
+                "name": "Peak",
+                "rate": "0.40",
+                "schedule": [
+                    {"days": ["Mon", "Tue", "Wed", "Thu", "Fri"], "start": "07:00", "end": "23:00"}
+                ],
+            },
+            {"name": "Off-Peak", "rate": "0.20", "schedule": []},
+        ],
+    })
+
+    result = ComparisonEngine().compare(meter, [plan], resolution=resolution)
+
+    weekday_warnings = [w for w in result.warnings if "weekday" in w.lower()]
+    assert len(weekday_warnings) == 1, (
+        f"Expected exactly one weekday-averaging warning, got {weekday_warnings}"
+    )
+    assert "Multi-year averaging" in weekday_warnings[0]
+    assert "single year" in weekday_warnings[0]
+
+
+def test_no_weekday_averaging_warning_with_flat_plan():
+    """Multi-year averaging + flat-rate plan (no day restriction) → no weekday warning.
+
+    A flat-rate plan has a single catch-all tier with an empty schedule
+    (applies at all times and all days). Since no tier restricts to a subset
+    of the week, the engine must NOT emit the weekday warning even when
+    multi-year averaging was used.
+
+    Hand-verification:
+      resolution.years_used = [2024, 2025]  (len > 1 → multi-year)
+      plan has one Flat tier with schedule=[]  (catch-all, no day restriction)
+      → _has_weekday_sensitive_rates returns False
+      → no warning emitted.
+    """
+    date = datetime.date(2024, 6, 3)
+    meter = _make_meter(date, [0.5] * 48)
+    resolution = _make_two_year_resolution(meter)
+
+    plan = _flat_plan("flat_no_warn", "0.20")
+
+    result = ComparisonEngine().compare(meter, [plan], resolution=resolution)
+
+    weekday_warnings = [w for w in result.warnings if "weekday" in w.lower()]
+    assert not weekday_warnings, (
+        f"Expected no weekday-averaging warning for flat-rate plan, got {weekday_warnings}"
+    )

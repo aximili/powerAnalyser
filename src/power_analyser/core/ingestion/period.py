@@ -2,16 +2,16 @@
 
 Lets the user choose a day/month window (with optional year selection) and
 collapses matching calendar days across years into one representative period
-by averaging kWh per interval position. The resulting :class:`MeterDataSet`
+by averaging kWh per wall-clock time slot. The resulting :class:`MeterDataSet`
 is fed unchanged into ``CostCalculator`` / ``ComparisonEngine`` — neither of
 those modules is modified.
 
-Averaging method = "average kWh, then cost" (Strategy A). Each contributing
-day for a given ``(month, day)`` is normalised to a fixed 48-slot grid aligned
-by interval **position** (so DST spring-forward days — which end up with 46
-rows post-dedup in the pipeline — are zero-padded to 48). The mean per
-position becomes the synthetic day, re-stamped onto the earliest contributing
-year so weekday-dependent tariffs within that year are respected.
+Averaging method = "average kWh, then cost" (Strategy A). For each
+``(month, day)`` pair the output index is taken from the earliest contributing
+year's actual tz-aware timestamps — preserving the real slot count for DST
+days (46 for spring-forward, 48 for normal and fall-back). Years are aligned
+by wall-clock time (not array position), and slots absent in a given year are
+excluded from the mean (NaN) rather than pulling it toward zero.
 
 Known limitation: because weekdays differ across years for the same calendar
 date, weekday-specific ToU / free-window plans are slightly smoothed under
@@ -31,9 +31,6 @@ import pandas as pd
 from .pipeline import MELBOURNE_TZ, MeterDataSet
 
 MonthDay = tuple[int, int]  # (month 1-12, day 1-31)
-
-#: Half-hour intervals per standard day.
-_SLOTS = 48
 
 #: Leap reference year used to enumerate valid calendar ``(month, day)``
 #: pairs — leap so Feb 29 is a real date while Feb 30 is not.
@@ -298,49 +295,33 @@ def _per_md_year_counts(df: pd.DataFrame) -> dict[MonthDay, int]:
     return {md: len(ys) for md, ys in counts.items()}
 
 
-def _to_slots(vals: np.ndarray) -> np.ndarray:
-    """Normalise a day's values to exactly 48 slots (zero-pad / truncate)."""
-    v = np.asarray(vals, dtype=float)
-    if len(v) < _SLOTS:
-        v = np.concatenate([v, np.zeros(_SLOTS - len(v), dtype=float)])
-    elif len(v) > _SLOTS:
-        v = v[:_SLOTS]
-    return v
-
-
-def _build_day_index(year: int, month: int, day: int) -> pd.DatetimeIndex:
-    """Regular 48-slot Melbourne-tz index for one date (mirrors pipeline DST handling)."""
-    naive = pd.date_range(
-        start=pd.Timestamp(year, month, day), periods=_SLOTS, freq="30min"
-    )
-    return naive.tz_localize(
-        MELBOURNE_TZ, ambiguous="infer", nonexistent="shift_forward"
-    )
-
-
 def _average(
     df: pd.DataFrame,
     years_used: set[int],
     notes: list[str],
     stream: str,
 ) -> tuple[pd.DataFrame, set[MonthDay]]:
-    """Average ``df`` per ``(month, day)`` by interval position.
+    """Average ``df`` per ``(month, day)`` by wall-clock time alignment.
 
     Returns the new DataFrame and the set of ``(month, day)`` it contains.
     ``years_used`` and ``notes`` are mutated in place (only ``E1`` feeds notes
     to avoid duplicates — the caller only passes ``B1`` for solar averaging).
+
+    The output index is drawn from the earliest contributing year's actual
+    timestamps, so spring-forward days produce 46-slot output and normal days
+    produce 48-slot output. Slots absent in a given year contribute NaN to the
+    mean (excluded) rather than zero.
     """
     if df.empty:
         empty = pd.DataFrame(columns=["kwh"])
         empty.index = pd.DatetimeIndex([], tz=MELBOURNE_TZ)
         return empty, set()
 
-    # (month, day) -> list of (year, 48-slot vector)
-    by_md: dict[MonthDay, list[tuple[int, np.ndarray]]] = defaultdict(list)
+    # (month, day) -> list of (year, sorted day-DataFrame)
+    by_md: dict[MonthDay, list[tuple[int, pd.DataFrame]]] = defaultdict(list)
     for date in sorted(set(df.index.date)):
         day_rows = df[df.index.date == date].sort_index()
-        vec = _to_slots(day_rows["kwh"].to_numpy(dtype=float))
-        by_md[(date.month, date.day)].append((date.year, vec))
+        by_md[(date.month, date.day)].append((date.year, day_rows))
 
     timestamps: list[pd.Timestamp] = []
     values: list[float] = []
@@ -350,11 +331,34 @@ def _average(
         entries = sorted(by_md[md], key=lambda e: e[0])
         for year, _ in entries:
             years_used.add(year)
-        ref_year = entries[0][0]
-        mat = np.vstack([vec for _, vec in entries])  # (n_years, 48)
-        mean_vec = mat.mean(axis=0)
-        idx = _build_day_index(ref_year, md[0], md[1])
-        timestamps.extend(idx)
+
+        # Canonical index = earliest year's real timestamps, deduplicated by
+        # wall-clock time (guards against shift_forward artefacts in test data).
+        _, ref_day = entries[0]
+        seen_times: set = set()
+        canonical_ts: list[pd.Timestamp] = []
+        for ts in ref_day.index:
+            t = ts.time()
+            if t not in seen_times:
+                seen_times.add(t)
+                canonical_ts.append(ts)
+        canonical_idx = pd.DatetimeIndex(canonical_ts)
+        canonical_times = [ts.time() for ts in canonical_idx]
+
+        # Align each year to the canonical time-of-day grid; NaN for absent slots.
+        rows: list[np.ndarray] = []
+        for _, day_df in entries:
+            time_to_val: dict = {}
+            for ts, val in zip(day_df.index, day_df["kwh"]):
+                t = ts.time()
+                if t not in time_to_val:
+                    time_to_val[t] = val
+            row = np.array([time_to_val.get(t, np.nan) for t in canonical_times])
+            rows.append(row)
+
+        mean_vec = np.nanmean(np.vstack(rows), axis=0)
+
+        timestamps.extend(canonical_idx)
         values.extend(mean_vec.tolist())
         md_present.add(md)
 

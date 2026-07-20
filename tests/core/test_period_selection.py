@@ -47,6 +47,21 @@ def _make_day_df(date: datetime.date, values: list[float]) -> pd.DataFrame:
     return pd.DataFrame({"kwh": values}, index=idx)
 
 
+def _spring_forward_day_index(date: datetime.date) -> pd.DatetimeIndex:
+    """Return the 46 real Melbourne timestamps for a spring-forward date.
+
+    Localises a full 48-slot naive range with nonexistent="NaT" then
+    strips the two NaT positions (naive 02:00 and 02:30) that fall inside
+    the DST gap. The result has 46 distinct tz-aware timestamps with no
+    02:00/02:30 and no duplicates at 03:00.
+    """
+    naive = pd.date_range(
+        pd.Timestamp(date.year, date.month, date.day), periods=48, freq="30min"
+    )
+    localized = naive.tz_localize(MELBOURNE_TZ, ambiguous="infer", nonexistent="NaT")
+    return localized[~pd.isnull(localized)]
+
+
 def _make_meter(
     e1_by_date: dict[datetime.date, list[float]],
     b1_by_date: dict[datetime.date, list[float]] | None = None,
@@ -403,19 +418,103 @@ def test_select_period_single_year_mode_all_identity():
     assert result.period_days == 5
 
 
-# ── 9. DST short day (46-slot) averaged → 48 slots ────────────────────────────
+# ── 9. DST spring-forward day: correct 46-slot output ────────────────────────
 
 
-def test_dst_short_day_averaged_to_48_slots():
-    """A 46-slot spring-forward day is zero-padded to 48 in the averaged output."""
-    # Build a day with only 46 values (simulating post-dedup DST day)
-    date = datetime.date(2025, 10, 5)  # around spring-forward
-    by_date = {date: [0.5] * 46}
-    meter = _make_meter(by_date)
+def test_dst_spring_forward_day_preserves_46_slots():
+    """A spring-forward day averages to exactly 46 real Melbourne slots.
+
+    Oct 5, 2025 is Melbourne's spring-forward day: clocks jump from 02:00
+    AEST to 03:00 AEDT, leaving 46 real half-hour slots.  The new averaging
+    logic must output exactly those 46 timestamps — no padding to 48, no
+    duplicate 03:00 entries, and no phantom 02:00/02:30 slots.
+
+    Hand-verification:
+      48-naive-slot range → tz_localize(nonexistent="NaT") → 2 NaT at
+      02:00 and 02:30 → filtered to 46 distinct tz-aware timestamps.
+      select_period on a single year must return those 46 timestamps verbatim.
+    """
+    date = datetime.date(2025, 10, 5)  # spring-forward in Melbourne 2025
+    idx = _spring_forward_day_index(date)
+    assert len(idx) == 46, "test precondition: spring-forward index must be 46 slots"
+
+    e1 = pd.DataFrame({"kwh": [0.5] * 46}, index=idx)
+    b1 = pd.DataFrame(columns=["kwh"])
+    b1.index = pd.DatetimeIndex([], tz=MELBOURNE_TZ)
+    meter = MeterDataSet(e1=e1, b1=b1, nmi="TEST", start_date=date, end_date=date)
+
     res = select_period(meter, (10, 5), (10, 5))
+
     assert res.period_days == 1
-    n = len(res.meter.e1[res.meter.e1.index.date == date])
-    assert n == 48, f"Expected 48 slots after padding, got {n}"
+    day_rows = res.meter.e1[res.meter.e1.index.date == date]
+    assert len(day_rows) == 46, f"Expected 46 slots, got {len(day_rows)}"
+
+    # No 02:00 or 02:30 in the output
+    times = {ts.time() for ts in day_rows.index}
+    import datetime as _dt
+    assert _dt.time(2, 0) not in times, "02:00 must not appear in spring-forward output"
+    assert _dt.time(2, 30) not in times, "02:30 must not appear in spring-forward output"
+
+    # No duplicate timestamps
+    assert len(day_rows.index) == len(set(day_rows.index)), "Duplicate timestamps found"
+
+
+def test_spring_forward_day_averaged_cross_year():
+    """Spring-forward day (46 slots, 2025) averaged with a normal day (48 slots, 2026).
+
+    Oct 5, 2025 is a spring-forward day; Oct 5, 2026 is a normal AEST day.
+    The earliest year (2025) is the reference, so the output must have 46 slots
+    (the real Melbourne timestamps for that day).  The kWh value at 15:00 must
+    be the exact mean of the two years' 15:00 values, NOT shifted to 14:00.
+
+    Hand-verification:
+      2025 values: 1.0 kWh/slot (spring-forward, 46 slots)
+      2026 values: 3.0 kWh/slot (normal, 48 slots)
+      Canonical index = 2025 timestamps (46 slots, no 02:00/02:30)
+      2026 aligned by time-of-day: 02:00 and 02:30 dropped (not in canonical)
+      Mean at 15:00 = (1.0 + 3.0) / 2 = 2.0
+    """
+    sf_date = datetime.date(2025, 10, 5)   # spring-forward, 46 slots
+    norm_date = datetime.date(2026, 10, 5)  # normal day, 48 slots
+
+    sf_idx = _spring_forward_day_index(sf_date)
+    norm_idx = _day_index(norm_date, 48)
+
+    sf_df = pd.DataFrame({"kwh": [1.0] * 46}, index=sf_idx)
+    norm_df = pd.DataFrame({"kwh": [3.0] * 48}, index=norm_idx)
+
+    e1 = pd.concat([sf_df, norm_df]).sort_index()
+    all_dates = sorted([sf_date, norm_date])
+    meter = MeterDataSet(
+        e1=e1,
+        b1=pd.DataFrame(columns=["kwh"]),
+        nmi="DST_TEST",
+        start_date=all_dates[0],
+        end_date=all_dates[-1],
+    )
+
+    res = select_period(meter, (10, 5), (10, 5))
+
+    assert res.averaged is True
+    assert res.years_used == [2025, 2026]
+
+    # Output must have 46 slots (canonical = 2025 spring-forward)
+    day_rows = res.meter.e1[res.meter.e1.index.date == sf_date]
+    assert len(day_rows) == 46, f"Expected 46 slots, got {len(day_rows)}"
+
+    # No 02:00/02:30 and no duplicates
+    times = {ts.time() for ts in day_rows.index}
+    import datetime as _dt
+    assert _dt.time(2, 0) not in times, "02:00 must not appear in output"
+    assert _dt.time(2, 30) not in times, "02:30 must not appear in output"
+    assert len(day_rows.index) == len(set(day_rows.index)), "Duplicate timestamps found"
+
+    # kWh at 15:00 is the correct cross-year average (not shifted to 14:00)
+    ts_15 = next(ts for ts in day_rows.index if ts.time() == _dt.time(15, 0))
+    kwh_15 = day_rows.loc[ts_15, "kwh"]
+    assert kwh_15 == pytest.approx(2.0), (
+        f"Expected 2.0 kWh at 15:00 (mean of 1.0 and 3.0), got {kwh_15}"
+    )
 
 
 # ── 10. b1 (export) averaged in parallel ──────────────────────────────────────

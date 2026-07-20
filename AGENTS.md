@@ -55,8 +55,10 @@ Reflect **only** when the change affects at least one of:
 
 ### Sharp edges to check against
 
-- **DST**: 46-row spring-forward days must zero-pad back to 48 slots
-  (`period.py`).
+- **DST**: 46-row spring-forward days must preserve their 46 real Melbourne
+  timestamps — no zero-padding to 48. The averaging loop uses the earliest
+  contributing year's actual tz-aware index as the canonical grid and aligns
+  other years by wall-clock time (`period.py:_average`).
 - **`plan_id`**: dedup in the repair pass must be stable — re-extraction
   overwrites the same file (`core/tariff/loader.py`).
 - **`last_updated`**: never taken from the model; stamped at capture time by
@@ -380,15 +382,17 @@ Algorithm:
 
 1. Filter `e1`/`b1` rows whose `(month, day)` ∈ `target_calendar_dates(...)`
    and (if `years` given) whose year ∈ `years`.
-2. **Average per `(month, day)`** by interval **position**: each contributing
-   day is normalised to a fixed 48-slot grid (DST spring-forward days, which
-   end up with 46 rows post-dedup in the pipeline, are zero-padded to 48);
-   mean the kWh per position across contributing days. `b1` is averaged the
-   same way so solar credits are averaged too.
-3. **Re-stamp** each averaged day onto the reference year = earliest selected
-   year that contains that `(m,d)`, via
-   `pd.date_range(...).tz_localize("Australia/Melbourne",
-   ambiguous="infer", nonexistent="shift_forward")` (mirrors `pipeline.py`).
+2. **Average per `(month, day)`** by **wall-clock time alignment**: for each
+   `(month, day)` group, the earliest contributing year's real tz-aware
+   timestamps become the canonical index (so spring-forward days keep 46 slots,
+   normal and fall-back days keep 48). Each other year's data is aligned to
+   that grid by `time()` lookup; slots absent in a given year (e.g. 02:00/02:30
+   from a year where that date isn't spring-forward) contribute `NaN` and are
+   excluded from the `nanmean`. `b1` is averaged the same way so solar credits
+   are averaged too.
+3. The output index **is** the canonical index from step 2 — no synthetic
+   re-stamp via `shift_forward`. The reference year's timestamps are used
+   verbatim.
 4. Build a new `MeterDataSet`; `period_days = len(set(e1.index.date))`.
 
 ### Known limitation (weekday smoothing)
@@ -399,6 +403,13 @@ plans are **slightly smoothed** under multi-year averaging. Flat, step, and
 7-day-free-window plans are exact (verified in
 `test_select_period_flat_rate_averaged_equals_mean_of_years`). Cost-level
 (Strategy B) averaging is out of scope.
+
+When `ComparisonEngine.compare()` is called with a `resolution` whose
+`years_used` has more than one entry, it checks whether any plan restricts a
+usage tier or free window to a subset of the week. If so, it appends a
+plain-English warning to `ComparisonResult.warnings` (once, regardless of how
+many plans qualify), advising the user to select a single year for best
+accuracy.
 
 ### Settings
 
