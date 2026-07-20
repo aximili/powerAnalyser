@@ -212,3 +212,97 @@ def test_short_day_pads_missing_intervals_and_warns(tmp_path):
     assert "32" in w
 
 
+# ── Duplicate timestamp deduplication keeps last (revised) reading ────────────
+
+
+def test_duplicate_timestamps_keep_last_and_warn(tmp_path):
+    """Overlapping 300-record date ranges: the revised (later) reading must win.
+
+    NEM12 files can contain a re-issued block for the same date. The first
+    block has all intervals = 0.1 kWh (stale). The second block has all
+    intervals = 0.9 kWh (revised). The pipeline must:
+      1. Keep the revised (last) values — 0.9 kWh per interval.
+      2. Emit exactly one warning naming the number of replaced intervals
+         and the affected date.
+
+    Hand-verification:
+      date 2024-06-01 appears twice in the combined series before dedup:
+        block A: 48 × 0.1 kWh
+        block B: 48 × 0.9 kWh  ← revised, should win
+      After dedup: 48 rows for 2024-06-01 each = 0.9 kWh.
+    """
+    def line300(datestr, n, val):
+        return "300," + datestr + "," + ",".join(val for _ in range(n)) + ",A,,,"
+
+    csv = "\n".join([
+        "100,NEM12,6408088506",
+        "200,6408088506,B1E1,E1,E1,,1217287,KWH,30,",
+        line300("20240601", 48, "0.1"),  # stale block
+        line300("20240601", 48, "0.9"),  # revised block — should win
+        "900",
+    ]) + "\n"
+    path = tmp_path / "revised.csv"
+    path.write_text(csv, encoding="utf-8")
+
+    meter = IngestionPipeline().load(path)
+
+    day = datetime.date(2024, 6, 1)
+    rows = meter.e1[meter.e1.index.date == day]
+    assert len(rows) == 48, "Revised day should have exactly 48 intervals"
+    assert (rows["kwh"].values == pytest.approx([0.9] * 48)), "Revised values (0.9) must win"
+
+    dup_warnings = [w for w in meter.warnings if "Duplicate" in w or "duplicate" in w]
+    assert len(dup_warnings) == 1
+    w = dup_warnings[0]
+    assert "48" in w
+    assert "2024-06-01" in w
+
+
+# ── Timezone failure raises RuntimeError (no silent UTC fallback) ─────────────
+
+
+def test_tz_localize_failure_raises_runtime_error(tmp_path, monkeypatch):
+    """When tz_localize raises, the pipeline must propagate a RuntimeError.
+
+    Regression for the C3 bug: the original code fell back to UTC silently,
+    producing timestamps 10-11 h behind Melbourne and corrupting every rate
+    boundary check for the day. The fix converts the fallback into a hard error.
+
+    Hand-verification: a normal 2024-06-01 block (48 intervals) is used.
+    tz_localize is monkeypatched to raise ValueError unconditionally.
+    The pipeline must raise RuntimeError (not swallow it), and the message
+    must name the block date and the underlying exception.
+    """
+    def line300(datestr, n, val="0.1"):
+        return "300," + datestr + "," + ",".join(val for _ in range(n)) + ",A,,,"
+
+    csv = "\n".join([
+        "100,NEM12,6408088506",
+        "200,6408088506,B1E1,E1,E1,,1217287,KWH,30,",
+        line300("20240601", 48),
+        "900",
+    ]) + "\n"
+    path = tmp_path / "tz_fail.csv"
+    path.write_text(csv, encoding="utf-8")
+
+    import pandas as pd
+    from power_analyser.core.ingestion import pipeline as pipeline_mod
+
+    original_tz_localize = pd.DatetimeIndex.tz_localize
+
+    def failing_tz_localize(self, *args, **kwargs):
+        raise ValueError("injected tz failure")
+
+    monkeypatch.setattr(pd.DatetimeIndex, "tz_localize", failing_tz_localize)
+
+    # The RuntimeError from _block_to_series is re-wrapped as ValueError by the
+    # outer _records_to_dataframe handler (which adds NMI/block context). Either
+    # way the error propagates — it is NOT silently swallowed and replaced with UTC.
+    with pytest.raises((RuntimeError, ValueError)) as exc_info:
+        IngestionPipeline().load(path)
+
+    # The original RuntimeError message must be visible somewhere in the chain.
+    full_msg = str(exc_info.value)
+    assert "2024-06-01" in full_msg
+    assert "injected tz failure" in full_msg
+

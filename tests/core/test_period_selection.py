@@ -155,6 +155,32 @@ def test_target_calendar_dates_invalid_endpoint_raises():
         target_calendar_dates((2, 30), (3, 5))
 
 
+def test_target_calendar_dates_wrap_around_ending_feb29():
+    """Wrap-around window ending on Feb 29 must not raise ValueError.
+
+    Regression for M3: the wrap-around path used _REF_LEAP_YEAR + 1 (2001) as
+    the end year unconditionally. 2001-02-29 does not exist → ValueError. The
+    fix uses _REF_LEAP_YEAR (2000) for the end date when to_md == (2, 29).
+
+    Window: Nov 1 → Feb 29 (a ~4-month Australian summer window).
+    Expected: the returned list starts at (11, 1) and ends at (2, 29), spanning
+    the year-end boundary without raising.
+
+    Hand-verification:
+      from_md = (11, 1), to_md = (2, 29) → wrap-around (11 > 2).
+      end_year = 2000 (leap), so _ref_date((2, 29), year=2000) = 2000-02-29 ✓.
+      The list covers (11,1)…(12,31) + (1,1)…(2,29), inclusive.
+    """
+    dates = target_calendar_dates((11, 1), (2, 29))
+    assert dates[0] == (11, 1)
+    assert dates[-1] == (2, 29)
+    # Nov: 30 days, Dec: 31, Jan: 31, Feb: 29 (leap) = 121 days
+    assert len(dates) == 121
+    assert (2, 29) in dates
+    assert (12, 31) in dates
+    assert (1, 1) in dates
+
+
 # ── 3. select_period single-year window: identity ─────────────────────────────
 
 

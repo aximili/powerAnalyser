@@ -132,9 +132,21 @@ def _records_to_dataframe(
     if not all_series:
         return _empty_kwh_frame(), warnings
 
-    combined = pd.concat(all_series).sort_index()
-    # Remove exact duplicates (same timestamp appearing in overlapping date ranges)
-    combined = combined[~combined.index.duplicated(keep="first")]
+    # Stable sort preserves concat order for equal timestamps, so a later block
+    # (revised data) stays after an earlier block (stale data) in the sorted
+    # result. keep="last" then correctly retains the revised reading.
+    combined = pd.concat(all_series).sort_index(kind="stable")
+    # NEM12 files may contain revised date ranges where a later block corrects an
+    # earlier one. keep="last" ensures revised readings win over stale ones.
+    dup_mask = combined.index.duplicated(keep="last")
+    n_dropped = int(dup_mask.sum())
+    if n_dropped > 0:
+        dropped_dates = sorted({ts.date() for ts in combined.index[dup_mask]})
+        warnings.append(
+            f"Duplicate timestamps: {n_dropped} stale interval(s) replaced by revised "
+            f"data on {', '.join(str(d) for d in dropped_dates)}."
+        )
+    combined = combined[~dup_mask]
     df = combined.to_frame(name="kwh")
     return df, warnings
 
@@ -210,10 +222,10 @@ def _block_to_series(
             nonexistent="shift_forward",
         )
     except Exception as exc:
-        warnings.append(
-            f"{block.date} ({block.suffix}): tz_localize failed ({exc}); falling back to UTC."
-        )
-        tz_index = index.tz_localize("UTC")
+        raise RuntimeError(
+            f"tz_localize to {MELBOURNE_TZ!r} failed for {block.suffix} block on "
+            f"{block.date}: {exc}. Billing cannot continue with a corrupted timezone."
+        ) from exc
 
     return pd.Series(
         data=intervals[:n_expected],

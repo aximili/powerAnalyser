@@ -113,9 +113,10 @@ class CostCalculator:
         daily_consumption_total = Decimal("0")
         daily_promotional_usage = Decimal("0")
 
-        # Pre-resolve step tariff (at most one per plan currently evaluated).
-        step: StepTariff | None = plan.step_tariffs[0] if plan.step_tariffs else None
-        step_threshold = Decimal(str(step.threshold_kwh_per_day)) if step else Decimal("0")
+        # All step tariffs sorted ascending by threshold; passed to _apply_usage_with_step.
+        steps: list[StepTariff] = sorted(
+            plan.step_tariffs, key=lambda s: s.threshold_kwh_per_day
+        )
 
         # B1 export keyed by timestamp for correct per-interval FiT matching.
         b1_kwh_by_ts: pd.Series = b1_day["kwh"] if not b1_day.empty else pd.Series(dtype=float)
@@ -138,8 +139,14 @@ class CostCalculator:
                 # Free-window kWh (daily_promotional_usage) is intentionally
                 # excluded from the step accumulator so that free usage cannot
                 # consume a consumer's off-peak step allowance.
+                # OPEN QUESTION (H5): overflow kWh (billed at overflow_tier) is
+                # also excluded here. On plans that combine a free window with a
+                # step threshold, overflow amounts never advance the step
+                # accumulator. Whether overflow *should* count is a design
+                # ambiguity; leave as-is until a plan with this combination
+                # is confirmed in production.
                 interval_cost, daily_consumption_total = _apply_usage_with_step(
-                    plan, dow, t, kwh_dec, daily_consumption_total, step, step_threshold
+                    plan, dow, t, kwh_dec, daily_consumption_total, steps
                 )
                 usage += interval_cost
 
@@ -216,25 +223,50 @@ def _apply_usage_with_step(
     t: datetime.time,
     kwh: Decimal,
     daily_total: Decimal,
-    step: StepTariff | None,
-    step_threshold: Decimal,
+    steps: list[StepTariff],
 ) -> tuple[Decimal, Decimal]:
     """Apply step-tariff and ToU rate logic for one non-free-window interval.
 
     Returns ``(cost, new_daily_total)``.
+
+    Rate bands (steps sorted ascending by threshold):
+      [0,        steps[0].threshold) → _find_active_tier (ToU-aware)
+      [steps[0], steps[1].threshold) → steps[0].tier_above
+      ...
+      [steps[N-1].threshold, ∞)     → steps[-1].tier_above
+
+    Each call may span multiple bands; the interval is split at each threshold
+    boundary it crosses.
     """
-    if step is not None and daily_total >= step_threshold:
-        cost = kwh * _find_tier_by_name(plan, step.tier_above).rate
-    elif step is not None and daily_total + kwh > step_threshold:
-        # This interval straddles the threshold: split at the boundary.
-        below_kwh = step_threshold - daily_total
-        above_kwh = kwh - below_kwh
-        cost = (
-            below_kwh * _find_tier_by_name(plan, step.tier_below).rate
-            + above_kwh * _find_tier_by_name(plan, step.tier_above).rate
+    if not steps:
+        return kwh * _find_active_tier(plan, dow, t).rate, daily_total + kwh
+
+    remaining = kwh
+    pos = daily_total
+    cost = Decimal("0")
+
+    for i, step in enumerate(steps):
+        threshold = Decimal(str(step.threshold_kwh_per_day))
+        if pos >= threshold:
+            continue  # already above this step
+
+        in_band = threshold - pos
+        rate = (
+            _find_active_tier(plan, dow, t).rate
+            if i == 0
+            else _find_tier_by_name(plan, steps[i - 1].tier_above).rate
         )
-    else:
-        cost = kwh * _find_active_tier(plan, dow, t).rate
+        if remaining <= in_band:
+            cost += remaining * rate
+            remaining = Decimal("0")
+            break
+        cost += in_band * rate
+        remaining -= in_band
+        pos = threshold
+
+    if remaining > Decimal("0"):
+        # Above all step thresholds
+        cost += remaining * _find_tier_by_name(plan, steps[-1].tier_above).rate
 
     return cost, daily_total + kwh
 
@@ -269,7 +301,11 @@ def _find_active_tier(plan: ElectricityPlan, dow: str, t: datetime.time) -> Usag
             return tier
     if fallback is not None:
         return fallback
-    return plan.usage_tiers[0]
+    raise ValueError(
+        f"No UsageTier matches day={dow!r} time={t} on plan '{plan.plan_id}'. "
+        f"The plan has a schedule gap — all day/time combinations must be covered "
+        f"by at least one tier (use an empty schedule for a catch-all)."
+    )
 
 
 def _find_tier_by_name(plan: ElectricityPlan, name: str) -> UsageTier:

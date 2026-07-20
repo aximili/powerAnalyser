@@ -722,6 +722,48 @@ def test_perfect_day_combined_scenario(perfect_day_plan_dict):
     assert result.total_net == Decimal("12.90")
 
 
+# ── Edge cases: plan schedule gap raises instead of silently falling back ─────
+
+def test_find_active_tier_raises_on_schedule_gap():
+    """A plan with no catch-all tier and a schedule that doesn't cover all days
+    must raise ValueError rather than silently billing at usage_tiers[0].
+
+    Regression for M1: the old code returned plan.usage_tiers[0] when no tier
+    matched and no catch-all (empty-schedule) tier existed, silently billing at
+    an arbitrary rate.
+
+    Plan: only a Peak tier covering Mon-Fri 07:00-23:00 — Saturday and Sunday
+    are not covered, and there is no catch-all tier.
+
+    Hand-verification: date 2024-06-08 is a Saturday. The first interval (00:00)
+    is not in any scheduled tier and there is no fallback → ValueError expected.
+    """
+    plan = ElectricityPlan.model_validate(
+        {
+            "plan_id": "test_gap",
+            "retailer": "Test Retailer",
+            "plan_name": "Schedule Gap",
+            "daily_supply_charge": "0.00",
+            "usage_tiers": [
+                {
+                    "name": "Peak",
+                    "rate": "0.40",
+                    "schedule": [
+                        {"days": ["Mon", "Tue", "Wed", "Thu", "Fri"],
+                         "start": "07:00", "end": "23:00"}
+                    ],
+                },
+            ],
+        }
+    )
+    # 2024-06-08 is a Saturday — no tier covers it
+    date = datetime.date(2024, 6, 8)
+    meter = _make_meter(date, [0.5] * 48)
+
+    with pytest.raises(ValueError, match="schedule gap"):
+        CostCalculator().calculate_period(meter, plan)
+
+
 # ── Edge cases: DST days ──────────────────────────────────────────────────────
 
 def test_dst_spring_forward_46_intervals(flat_rate_plan_dict):
@@ -989,40 +1031,26 @@ def test_free_window_consumption_should_not_consume_step_threshold():
     assert result.total_net == Decimal("1.00") + Decimal("2.0") * Decimal("0.10")  # 1.20
 
 
-def test_second_step_tariff_is_silently_ignored():
-    """Only ``plan.step_tariffs[0]`` is consulted; any later step is dropped.
+def test_second_step_tariff_is_applied():
+    """Both step_tariffs are evaluated; the engine iterates all steps in threshold order.
 
-    Pins calculator.py:113 (``step = plan.step_tariffs[0]``). The FOUR4FREE
-    real plan declares TWO step tariffs; the second (50 kWh midday cap) is
-    structurally invisible to the engine today. This test documents that
-    current behaviour so it can be updated if/when per-window step counters
-    land. NB: the schema still accepts ``step_tariffs`` as a list, and the
-    ``_validate_tier_references`` validator still checks every entry's tier
-    names — so the second step must reference valid tiers even though it is
-    never evaluated.
+    Previously only step_tariffs[0] was consulted (bug C2). This regression test
+    verifies the fix: both thresholds split daily consumption into three bands.
 
     Plan (synthetic):
       - Low  $0.20  catch-all
       - Mid  $0.30  catch-all
       - High $0.40  catch-all
-      - step[0]: threshold 5.0,  tier_below=Low,  tier_above=Mid
-      - step[1]: threshold 10.0, tier_below=Mid,  tier_above=High   ← ignored today
+      - step[0]: threshold  5.0, tier_below=Low, tier_above=Mid
+      - step[1]: threshold 10.0, tier_below=Mid, tier_above=High
 
-    Mon 2024-06-03, uniform 0.5 kWh × 48 = 24 kWh. Threshold 5.0 is landed-on
-    exactly at the end of interval #9 (dct 4.5 → 5.0).
+    Mon 2024-06-03, uniform 0.5 kWh × 48 = 24 kWh.
 
-    Hand-math (CURRENT behaviour — only step[0] is used):
-      i 0..9   (dct 0.0 → 5.0):  else branch,        Low 0.20 → 5.0 × 0.20 = 1.00
-      i 10..47 (dct 5.0 → 24.0): already_above vs 5, Mid 0.30 → 19.0 × 0.30 = 5.70
-      total_usage = 6.70
-
-    Hand-math (HYPOTHETICAL — if step[1] were also applied):
-      i 0..9   (dct 0 → 5):  Low  0.20 → 5.0 × 0.20 = 1.00
-      i 10..19 (dct 5 → 10): Mid  0.30 → 5.0 × 0.30 = 1.50
-      i 20..47 (dct 10+):    High 0.40 → 14.0 × 0.40 = 5.60
-      total_usage = 8.10  ← NOT what the engine returns today
-
-    The $1.40 gap (8.10 − 6.70) is the behaviour this test pins as missing.
+    Hand-math (correct behaviour — both steps applied):
+      Band 0 [0, 5):   10 intervals × 0.5 kWh @ Low  $0.20 = 5.0 × 0.20 = 1.00
+      Band 1 [5, 10):  10 intervals × 0.5 kWh @ Mid  $0.30 = 5.0 × 0.30 = 1.50
+      Band 2 [10, ∞):  28 intervals × 0.5 kWh @ High $0.40 = 14.0 × 0.40 = 5.60
+      total_usage = 8.10
     """
     plan = ElectricityPlan.model_validate(
         {
@@ -1041,18 +1069,100 @@ def test_second_step_tariff_is_silently_ignored():
             ],
         }
     )
-    assert len(plan.step_tariffs) == 2, "schema accepts both steps"
+    assert len(plan.step_tariffs) == 2
 
     date = datetime.date(2024, 6, 3)  # Monday
     meter = _make_meter(date, [0.5] * 48)  # 24 kWh uniform
 
     result = CostCalculator().calculate_period(meter, plan)
 
-    # Current behaviour: only step[0] (Low → Mid at 5.0 kWh) is consulted.
-    expected_usage = Decimal("5.0") * Decimal("0.20") + Decimal("19.0") * Decimal("0.30")
+    expected_usage = (
+        Decimal("5.0") * Decimal("0.20")
+        + Decimal("5.0") * Decimal("0.30")
+        + Decimal("14.0") * Decimal("0.40")
+    )
     assert result.total_usage == expected_usage
-    assert result.total_usage == Decimal("6.70")
+    assert result.total_usage == Decimal("8.10")
 
-    # If step[1] were applied, usage would be $8.10. Pin the gap explicitly so
-    # a future per-window implementation is forced to revisit this assertion.
-    assert result.total_usage != Decimal("5.0") * Decimal("0.20") + Decimal("5.0") * Decimal("0.30") + Decimal("14.0") * Decimal("0.40")
+
+def test_two_step_tariff_interval_straddles_second_threshold():
+    """An interval that crosses the second (higher) step threshold is split correctly.
+
+    Plan:
+      - Low  $0.10  catch-all
+      - Mid  $0.20  catch-all
+      - High $0.30  catch-all
+      - step[0]: threshold  4.0, tier_below=Low,  tier_above=Mid
+      - step[1]: threshold  6.0, tier_below=Mid,  tier_above=High
+
+    Mon 2024-06-03. Uniform 0.4 kWh per interval.
+
+    After 15 intervals: dct = 6.0 kWh exactly (no straddle of either threshold).
+    Check: 4.0 / 0.4 = 10 intervals at Low, then (6.0-4.0) / 0.4 = 5 intervals
+    at Mid, 16th interval (idx 15) lands dct at 6.0 exactly → still Mid rate.
+    17th interval (idx 16) is first fully in High band.
+
+    Wait — use 0.3 kWh to get a straddle of the second threshold:
+      After 20 intervals: dct = 6.0 kWh exactly → interval 21 is High.
+      After 13 intervals: dct = 3.9 kWh; interval 14 brings it to 4.2 → straddles step[0].
+      After 19 intervals: dct = 5.7 kWh; interval 20 brings it to 6.0 exactly → no straddle.
+      After 20 intervals: dct = 6.0; interval 21 → fully in High (above both thresholds).
+
+    Use a non-uniform profile to force the straddle of the SECOND threshold.
+    Values: 14 × 0.5 kWh (7.0 kWh total, crosses both thresholds).
+      - dct after 8 intervals: 4.0 → interval 9 straddles step[0] (4.0+0.5=4.5 > 4.0)
+
+    Actually, let's use: first 8 intervals 0.5 kWh, last 6 intervals 0.5 kWh.
+    Better: use a clean setup where the straddle lands on step[1].
+
+    Profile: 12 × 0.5 kWh = 6.0 kWh, but place them so the second threshold is straddled.
+    - 7 intervals × 0.5 = 3.5 kWh (below step[0])
+    - Interval 8: 0.5 kWh → dct 3.5 → 4.0 (lands exactly on step[0], no straddle)
+    - Interval 9: 0.5 kWh → dct 4.0 → 4.5 (Mid rate)
+    - 3 more intervals × 0.5 = 5.0, 5.5, 6.0
+    - Use 0.7 kWh for one interval to straddle step[1]:
+      After 11 × 0.5 = 5.5; interval 12 = 0.7 → dct 5.5 → 6.2, straddles step[1] (6.0).
+
+    Hand-math:
+      i 0..7  (8 × 0.5, dct 0→4.0):  Low  $0.10 → 4.0 × 0.10 = 0.40
+      i 8..10 (3 × 0.5, dct 4→5.5):  Mid  $0.20 → 1.5 × 0.20 = 0.30
+      i 11    (0.7,     dct 5.5→6.2): split at 6.0 → 0.5 @ Mid $0.20 + 0.2 @ High $0.30
+                                        = 0.5×0.20 + 0.2×0.30 = 0.10 + 0.06 = 0.16
+      total_usage = 0.40 + 0.30 + 0.16 = 0.86
+    """
+    plan = ElectricityPlan.model_validate(
+        {
+            "plan_id": "test_two_step_straddle",
+            "retailer": "Test Retailer",
+            "plan_name": "Two Step Straddle",
+            "daily_supply_charge": "0.00",
+            "usage_tiers": [
+                {"name": "Low",  "rate": "0.10", "schedule": []},
+                {"name": "Mid",  "rate": "0.20", "schedule": []},
+                {"name": "High", "rate": "0.30", "schedule": []},
+            ],
+            "step_tariffs": [
+                {"threshold_kwh_per_day": 4.0, "tier_below": "Low", "tier_above": "Mid"},
+                {"threshold_kwh_per_day": 6.0, "tier_below": "Mid", "tier_above": "High"},
+            ],
+        }
+    )
+    date = datetime.date(2024, 6, 3)  # Monday
+    # 8 × 0.5 + 3 × 0.5 + 1 × 0.7 = 4.0 + 1.5 + 0.7 = 6.2 kWh, rest zero
+    values = [0.5] * 8 + [0.5] * 3 + [0.7] + [0.0] * 36
+    assert len(values) == 48
+    meter = _make_meter(date, values)
+
+    result = CostCalculator().calculate_period(meter, plan)
+
+    # Band 0 [0, 4.0):  8 × 0.5 = 4.0 kWh @ Low  $0.10 = 0.40
+    # Band 1 [4.0, 6.0):  3 × 0.5 = 1.5 kWh @ Mid $0.20 = 0.30
+    # Straddling interval: 0.5 @ Mid $0.20 + 0.2 @ High $0.30 = 0.10 + 0.06 = 0.16
+    expected_usage = (
+        Decimal("4.0") * Decimal("0.10")
+        + Decimal("1.5") * Decimal("0.20")
+        + Decimal("0.5") * Decimal("0.20")
+        + Decimal("0.2") * Decimal("0.30")
+    )
+    assert result.total_usage == expected_usage
+    assert result.total_usage == Decimal("0.86")

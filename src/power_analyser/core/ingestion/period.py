@@ -99,11 +99,20 @@ def target_calendar_dates(from_md: MonthDay, to_md: MonthDay) -> list[MonthDay]:
     (Feb 30, Apr 31, …) are skipped because they can never be constructed.
     Raises ``ValueError`` if an endpoint is itself not a real calendar date.
     """
-    start = _ref_date(from_md)
     if from_md <= to_md:
+        start = _ref_date(from_md)
         end = _ref_date(to_md)
     else:
-        end = _ref_date(to_md, year=_REF_LEAP_YEAR + 1)
+        # Wrap-around window crosses year-end (e.g. Nov → Feb).
+        # end must be in a year strictly after start's year.
+        # Feb 29 end requires a leap year; year 2001 has no Feb 29, so use
+        # year 1999 for start and _REF_LEAP_YEAR (2000) for end in that case.
+        if to_md == (2, 29):
+            start = _ref_date(from_md, year=_REF_LEAP_YEAR - 1)  # 1999
+            end = _ref_date(to_md, year=_REF_LEAP_YEAR)           # 2000-02-29
+        else:
+            start = _ref_date(from_md)                             # 2000
+            end = _ref_date(to_md, year=_REF_LEAP_YEAR + 1)       # 2001
 
     out: list[MonthDay] = []
     d = start
