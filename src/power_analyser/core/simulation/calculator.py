@@ -25,6 +25,10 @@ import pandas as pd
 from ..ingestion.pipeline import MeterDataSet
 from ..tariff.schema import ElectricityPlan, FiTTier, FreeWindow, StepTariff, TimeRange, UsageTier
 
+# Locale-independent weekday names matching the DayOfWeek literals in schema.py.
+# pd.Timestamp.weekday() returns 0 for Monday through 6 for Sunday.
+_WEEKDAY_NAMES: list[str] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
 
 @dataclass
 class DailyCost:
@@ -105,77 +109,44 @@ class CostCalculator:
         solar_credit = Decimal("0")
         promotional_saving = Decimal("0")
 
-        # Running totals used for step-tariff tracking
+        # Running totals used for step-tariff and free-window cap tracking.
         daily_consumption_total = Decimal("0")
         daily_promotional_usage = Decimal("0")
 
-        # Pre-resolve step tariff (at most one per plan)
+        # Pre-resolve step tariff (at most one per plan currently evaluated).
         step: StepTariff | None = plan.step_tariffs[0] if plan.step_tariffs else None
         step_threshold = Decimal(str(step.threshold_kwh_per_day)) if step else Decimal("0")
 
-        b1_values = b1_day["kwh"].tolist() if not b1_day.empty else []
+        # B1 export keyed by timestamp for correct per-interval FiT matching.
+        b1_kwh_by_ts: pd.Series = b1_day["kwh"] if not b1_day.empty else pd.Series(dtype=float)
 
-        for i, ts in enumerate(e1_day.index):
-            kwh_dec = Decimal(str(float(e1_day.iloc[i]["kwh"])))
+        for ts in e1_day.index:
+            kwh_dec = Decimal(str(float(e1_day.at[ts, "kwh"])))
             t = ts.time()
-            dow = ts.strftime("%a")
+            dow = _day_of_week(ts)
 
             # ── Promotional / free-window check ──────────────────────────────
             fw = _find_active_free_window(plan, dow, t)
-            cap = (
-                Decimal(str(fw.fair_use_cap_kwh))
-                if (fw and fw.fair_use_cap_kwh is not None)
-                else None
-            )
-            in_free_window = fw is not None and (
-                cap is None or daily_promotional_usage < cap
-            )
-
-            if in_free_window:
-                remaining_cap = (cap - daily_promotional_usage) if cap is not None else kwh_dec
-                free_kwh = min(kwh_dec, remaining_cap)
-                overflow_kwh = kwh_dec - free_kwh
-
-                daily_promotional_usage += free_kwh
-                # Track what the free usage would have cost at the standard tier
-                base_rate = _find_active_tier(plan, dow, t).rate
-                promotional_saving += free_kwh * base_rate
-
-                if overflow_kwh > 0:
-                    overflow_tier = _find_tier_by_name(plan, fw.overflow_tier)
-                    usage += overflow_kwh * overflow_tier.rate
-
+            if fw is not None and _cap_not_exhausted(fw, daily_promotional_usage):
+                interval_cost, interval_promo, daily_promotional_usage = (
+                    _apply_free_window_interval(fw, plan, dow, t, kwh_dec, daily_promotional_usage)
+                )
+                usage += interval_cost
+                promotional_saving += interval_promo
             else:
                 # ── Standard tier with step-tariff logic ─────────────────────
-                already_above = step is not None and daily_consumption_total >= step_threshold
-                crosses_now = (
-                    step is not None
-                    and not already_above
-                    and daily_consumption_total + kwh_dec > step_threshold
+                # Free-window kWh (daily_promotional_usage) is intentionally
+                # excluded from the step accumulator so that free usage cannot
+                # consume a consumer's off-peak step allowance.
+                interval_cost, daily_consumption_total = _apply_usage_with_step(
+                    plan, dow, t, kwh_dec, daily_consumption_total, step, step_threshold
                 )
+                usage += interval_cost
 
-                if crosses_now:
-                    # Split this interval at the threshold boundary
-                    below_kwh = step_threshold - daily_consumption_total
-                    above_kwh = kwh_dec - below_kwh
-                    usage += below_kwh * _find_tier_by_name(plan, step.tier_below).rate
-                    usage += above_kwh * _find_tier_by_name(plan, step.tier_above).rate
-                elif already_above:
-                    usage += kwh_dec * _find_tier_by_name(plan, step.tier_above).rate
-                else:
-                    usage += kwh_dec * _find_active_tier(plan, dow, t).rate
-
-                # Only count non-free-window kWh toward the step threshold.
-                # Free-window usage has its own cap (daily_promotional_usage)
-                # and must not consume the off-peak step's daily allowance.
-                daily_consumption_total += kwh_dec
-
-            # ── Solar FiT ─────────────────────────────────────────────────────
-            if i < len(b1_values) and b1_values[i] > 0:
-                b1_kwh = Decimal(str(float(b1_values[i])))
-                fit = _find_active_fit_tier(plan, dow, t)
-                if fit:
-                    solar_credit += b1_kwh * fit.rate
+            # ── Solar FiT — matched by timestamp, not position ────────────────
+            b1_kwh_raw = float(b1_kwh_by_ts.get(ts, 0.0))
+            if b1_kwh_raw > 0:
+                solar_credit += _apply_fit(plan, dow, t, Decimal(str(b1_kwh_raw)))
 
         return DailyCost(
             date=date,
@@ -185,6 +156,98 @@ class CostCalculator:
             promotional_saving=promotional_saving,
             net=supply + usage - solar_credit,
         )
+
+
+# ── Per-interval billing sub-functions ────────────────────────────────────────
+
+
+def _day_of_week(ts: pd.Timestamp) -> str:
+    """Return the 3-letter day abbreviation matching DayOfWeek literals.
+
+    Uses pd.Timestamp.weekday() (locale-independent) rather than strftime("%a"),
+    which varies with the system LC_TIME setting.
+    """
+    return _WEEKDAY_NAMES[ts.weekday()]
+
+
+def _cap_not_exhausted(fw: FreeWindow, daily_promo_used: Decimal) -> bool:
+    """Return True if the free-window cap has not yet been fully consumed."""
+    if fw.fair_use_cap_kwh is None:
+        return True
+    return daily_promo_used < Decimal(str(fw.fair_use_cap_kwh))
+
+
+def _apply_free_window_interval(
+    fw: FreeWindow,
+    plan: ElectricityPlan,
+    dow: str,
+    t: datetime.time,
+    kwh: Decimal,
+    daily_promo_used: Decimal,
+) -> tuple[Decimal, Decimal, Decimal]:
+    """Apply one interval's free-window logic.
+
+    Returns ``(usage_cost, promotional_saving, new_daily_promo_used)``.
+
+    ``usage_cost`` is non-zero only when this interval straddles the cap
+    boundary and has overflow kWh billed at ``fw.overflow_tier``.
+    ``promotional_saving`` is the avoided cost for the free portion.
+    """
+    cap = Decimal(str(fw.fair_use_cap_kwh)) if fw.fair_use_cap_kwh is not None else None
+    remaining = (cap - daily_promo_used) if cap is not None else kwh
+    free_kwh = min(kwh, remaining)
+    overflow_kwh = kwh - free_kwh
+
+    new_promo_used = daily_promo_used + free_kwh
+    base_rate = _find_active_tier(plan, dow, t).rate
+    promo_saving = free_kwh * base_rate
+
+    overflow_cost = Decimal("0")
+    if overflow_kwh > 0 and fw.overflow_tier is not None:
+        overflow_tier = _find_tier_by_name(plan, fw.overflow_tier)
+        overflow_cost = overflow_kwh * overflow_tier.rate
+
+    return overflow_cost, promo_saving, new_promo_used
+
+
+def _apply_usage_with_step(
+    plan: ElectricityPlan,
+    dow: str,
+    t: datetime.time,
+    kwh: Decimal,
+    daily_total: Decimal,
+    step: StepTariff | None,
+    step_threshold: Decimal,
+) -> tuple[Decimal, Decimal]:
+    """Apply step-tariff and ToU rate logic for one non-free-window interval.
+
+    Returns ``(cost, new_daily_total)``.
+    """
+    if step is not None and daily_total >= step_threshold:
+        cost = kwh * _find_tier_by_name(plan, step.tier_above).rate
+    elif step is not None and daily_total + kwh > step_threshold:
+        # This interval straddles the threshold: split at the boundary.
+        below_kwh = step_threshold - daily_total
+        above_kwh = kwh - below_kwh
+        cost = (
+            below_kwh * _find_tier_by_name(plan, step.tier_below).rate
+            + above_kwh * _find_tier_by_name(plan, step.tier_above).rate
+        )
+    else:
+        cost = kwh * _find_active_tier(plan, dow, t).rate
+
+    return cost, daily_total + kwh
+
+
+def _apply_fit(
+    plan: ElectricityPlan,
+    dow: str,
+    t: datetime.time,
+    b1_kwh: Decimal,
+) -> Decimal:
+    """Return the FiT credit earned on ``b1_kwh`` of solar export."""
+    fit = _find_active_fit_tier(plan, dow, t)
+    return b1_kwh * fit.rate if fit else Decimal("0")
 
 
 # ── Tariff resolution helpers ──────────────────────────────────────────────────

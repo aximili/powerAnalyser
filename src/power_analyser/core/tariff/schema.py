@@ -43,6 +43,17 @@ class TimeRange(BaseModel):
     start: time  # inclusive
     end: time    # exclusive; if end <= start the range is overnight
 
+    @model_validator(mode="after")
+    def _validate_start_ne_end(self) -> "TimeRange":
+        if self.start == self.end:
+            raise ValueError(
+                f"TimeRange start and end must differ (both are {self.start!r}). "
+                "An equal start/end matches every time of day, which is almost "
+                "certainly a misconfiguration. Use an empty schedule list for a "
+                "catch-all tier instead."
+            )
+        return self
+
 
 class UsageTier(BaseModel):
     """One rate band within a usage structure.
@@ -62,9 +73,10 @@ class UsageTier(BaseModel):
 class FreeWindow(BaseModel):
     """A zero-cost (promotional) usage window with an optional daily cap.
 
-    If ``fair_use_cap_kwh`` is None the window is uncapped.
-    Once the cap is reached, any additional consumption in the window
-    is billed at ``overflow_tier``.
+    If ``fair_use_cap_kwh`` is None the window is uncapped and
+    ``overflow_tier`` may be omitted. When a cap is set, ``overflow_tier``
+    is required so the engine knows which rate to apply once the cap is
+    exhausted.
     """
 
     name: str
@@ -74,9 +86,19 @@ class FreeWindow(BaseModel):
         ge=0,
         description="Maximum free kWh per day; None = no cap",
     )
-    overflow_tier: str = Field(
-        description="UsageTier.name to apply after the cap is exhausted"
+    overflow_tier: str | None = Field(
+        default=None,
+        description="UsageTier.name to apply after the cap is exhausted; required when fair_use_cap_kwh is set",
     )
+
+    @model_validator(mode="after")
+    def _validate_overflow_tier_required_when_capped(self) -> "FreeWindow":
+        if self.fair_use_cap_kwh is not None and self.overflow_tier is None:
+            raise ValueError(
+                f"FreeWindow '{self.name}' has fair_use_cap_kwh={self.fair_use_cap_kwh} "
+                "but no overflow_tier. Specify which tier to bill once the cap is exhausted."
+            )
+        return self
 
 
 class FiTTier(BaseModel):
@@ -134,7 +156,7 @@ class ElectricityPlan(BaseModel):
         tier_names = {t.name for t in self.usage_tiers}
 
         for fw in self.free_windows:
-            if fw.overflow_tier not in tier_names:
+            if fw.overflow_tier is not None and fw.overflow_tier not in tier_names:
                 raise ValueError(
                     f"FreeWindow '{fw.name}' references unknown overflow_tier "
                     f"'{fw.overflow_tier}'. Known tiers: {sorted(tier_names)}"
