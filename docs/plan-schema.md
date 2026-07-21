@@ -41,7 +41,8 @@ every 30-minute interval:
 | `usage_tiers` | array | yes (≥1) | One or more usage rate bands. See [Usage tiers](#usagetier). |
 | `free_windows` | array | no (default `[]`) | Promotional $0 / discounted windows. See [Free windows](#freewindow). |
 | `fit_tiers` | array | no (default `[]`) | Solar feed-in credit tiers. See [FiT tiers](#fittier). |
-| `step_tariffs` | array | no (default `[]`) | Daily consumption thresholds. See [Step tariffs](#steptariff). |
+| `step_tariffs` | array | no (default `[]`) | Daily **consumption** thresholds. See [Step tariffs](#steptariff). |
+| `fit_steps` | array | no (default `[]`) | Daily **export** thresholds (volume-tiered feed-in). See [FiT steps](#fitstep). |
 | `valid_from` | string | no | ISO date the rates start (informational), e.g. `"2024-01-01"`. |
 | `valid_to` | string | no | ISO date the rates end (informational), e.g. `"2025-12-31"`. |
 | `last_updated` | string | no | ISO-8601 **datetime** the data was captured/edited (informational), e.g. `"2026-07-14T11:30:00+10:00"`. See [last_updated & conditions](#last_updated--conditions). |
@@ -181,6 +182,26 @@ at `tier_below`, the portion above at `tier_above`.
 | `tier_below` | string | yes | `UsageTier.name` below the threshold. |
 | `tier_above` | string | yes | `UsageTier.name` above the threshold. |
 
+### FiTStep
+
+A daily **export** threshold that changes the feed-in credit rate — the FiT
+twin of `StepTariff`. Once cumulative daily *export* crosses
+`threshold_kwh_per_day`, the crossing interval splits: export below the
+threshold is credited at `tier_below`, above at `tier_above` (both naming a
+`FiTTier`). Models "premium feed-in on the first N kWh/day exported, lower rate
+after" (e.g. 8c on the first 10 kWh/day, 4c beyond).
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `threshold_kwh_per_day` | number | yes | `> 0`. Cumulative **export** kWh/day. |
+| `tier_below` | string | yes | `FiTTier.name` credited below the threshold. |
+| `tier_above` | string | yes | `FiTTier.name` credited above the threshold. |
+
+> **Volume-tiered and time-varying FiT are separate modes.** When `fit_steps`
+> is present the engine resolves FiT purely by export volume and the referenced
+> tiers' `schedule` is ignored. Use time-varying FiT (`FiTTier.schedule`) *or*
+> volume-tiered FiT (`fit_steps`), not both on one plan.
+
 ---
 
 ## Validation rules
@@ -188,10 +209,12 @@ at `tier_below`, the portion above at `tier_above`.
 - `usage_tiers` must contain **at least one** entry.
 - All rates and the supply charge must be `≥ 0`; `threshold_kwh_per_day > 0`.
 - `TimeRange.days` must be **non-empty**.
-- Every **name reference** must point to an existing `usage_tiers[].name`:
-  - `FreeWindow.overflow_tier`
-  - `StepTariff.tier_below` and `StepTariff.tier_above`
+- Every **name reference** must point to an existing tier:
+  - `FreeWindow.overflow_tier` → `usage_tiers[].name`
+  - `StepTariff.tier_below` / `StepTariff.tier_above` → `usage_tiers[].name`
+  - `FiTStep.tier_below` / `FiTStep.tier_above` → `fit_tiers[].name`
   - A dangling reference raises a `ValueError` at load time.
+- `StepTariff` and `FiTStep` `tier_below` and `tier_above` must differ.
 
 ---
 
@@ -319,6 +342,50 @@ First 5 kWh/day at the low rate, everything above at the high rate:
 }
 ```
 
+### 5. Volume-tiered solar feed-in (`fit_steps`)
+
+Premium feed-in on the first 10 kWh exported each day, a lower rate beyond —
+common on post-deregulation VIC solar plans (e.g. AGL Solar Savers):
+
+```json
+{
+  "plan_id": "sample_volume_tiered_fit",
+  "retailer": "Sample Retailer E",
+  "plan_name": "Solar Saver (Volume-Tiered Feed-in)",
+  "daily_supply_charge": "0.9500",
+  "usage_tiers": [
+    { "name": "Flat", "rate": "0.2800", "schedule": [] }
+  ],
+  "free_windows": [],
+  "fit_tiers": [
+    { "name": "Premium export", "rate": "0.0800", "schedule": [] },
+    { "name": "Excess export", "rate": "0.0400", "schedule": [] }
+  ],
+  "step_tariffs": [],
+  "fit_steps": [
+    { "threshold_kwh_per_day": 10.0, "tier_below": "Premium export", "tier_above": "Excess export" }
+  ]
+}
+```
+
+---
+
+## Discounts & effective rates
+
+The engine does **not** compute conditional or guaranteed percentage discounts
+(pay-on-time, direct-debit, etc.). To keep plan modelling simple and robust,
+**enter the effective (already-discounted) rates you expect to pay** in
+`daily_supply_charge` and the usage/FiT rates, and record what the customer must
+do to get them in `conditions` (e.g. `"Pay-on-time discount applied"`,
+`"Direct debit required"`).
+
+- A conditional discount (e.g. "34% off usage + supply if you pay on time")
+  usually applies to **both** usage and supply — bake it into every rate and the
+  supply charge, not just one.
+- `conditions` is informational only; it never changes the computed cost. It
+  documents the assumption behind the effective rates so the ranking stays
+  honest and auditable.
+
 ---
 
 ## `last_updated` & conditions
@@ -348,6 +415,32 @@ requirements attached to the rates, for example:
 
 - Use `[]` (or omit the field) when there are no special conditions.
 - Surfaced in the exported CSV (joined with `"; "`) and otherwise informational.
+
+---
+
+## Not modelled (known limitations)
+
+These real-world structures are intentionally **out of scope**. Where one
+applies, fold it into the effective rates above or treat the ranking as an
+approximation:
+
+- **Controlled load / dedicated circuits** (off-peak hot water, pool pump on a
+  separate meter element). Only the `E1` (general consumption) and `B1` (solar
+  export) NEM12 streams are ingested; a controlled-load stream is not read, so
+  that consumption and its separate tariff are not costed.
+- **Demand charges** ($/kW of peak demand). Not modelled. (Victorian
+  *residential* demand tariffs are being retired from 1 July 2026, so this
+  mainly affects legacy/business data.)
+- **Seasonal rates** — schedules vary by day-of-week and time only, not by
+  date/season. (Standard VIC residential usage rates are not seasonal.)
+- **Quarterly / billing-period block thresholds** — `step_tariffs` and
+  `fit_steps` thresholds are **per day**. (VIC residential blocks are daily;
+  per-quarter blocks are a business/other-state structure.)
+- **One-off credits** (sign-up / welcome credits) — a period-cost ranking would
+  be distorted by a one-off amount; factor these in yourself when weighing plans.
+- **Wholesale/spot pass-through plans** (e.g. Amber) — these need an external
+  30-minute AEMO price series, which is outside the self-contained plan-JSON
+  model.
 
 ---
 

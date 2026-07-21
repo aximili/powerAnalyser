@@ -23,6 +23,13 @@ import pandas as pd
 
 from ..tariff.schema import ElectricityPlan, TimeRange
 
+# Locale-independent weekday abbreviations matching the DayOfWeek literals in
+# schema.py (pd.Timestamp.weekday(): 0=Mon … 6=Sun). Mirrors
+# calculator._WEEKDAY_NAMES — never use strftime("%a"), which varies with the
+# system LC_TIME locale and silently stops matching schedules on non-English
+# systems.
+_WEEKDAY_NAMES: list[str] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
 
 @dataclass
 class SourceWindow:
@@ -79,7 +86,7 @@ class LoadShiftSimulator:
         for date in pd.unique(simulated.index.normalize()):
             day_mask = simulated.index.normalize() == date
             day_index = simulated.index[day_mask]
-            dow = date.strftime("%a")
+            dow = _WEEKDAY_NAMES[date.weekday()]
 
             total_shifted_kwh = 0.0
 

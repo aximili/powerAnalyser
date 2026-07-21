@@ -88,6 +88,60 @@ def test_total_energy_is_conserved(smart_plan):
     )
 
 
+def test_load_shift_weekday_matching_is_locale_independent(smart_plan):
+    """Weekday matching must not depend on the system LC_TIME locale.
+
+    Regression: the simulator used ``date.strftime("%a")``, which yields
+    localized abbreviations (e.g. 'Mi.' under de_DE) that never match the
+    'Mon'..'Sun' schedule literals — silently disabling ALL load-shifting on
+    non-English systems. Runs under a non-English locale when one is installed;
+    skips otherwise.
+    """
+    import locale as _locale
+
+    saved = _locale.setlocale(_locale.LC_TIME)
+    chosen = None
+    for cand in ("de_DE.UTF-8", "fr_FR.UTF-8", "es_ES.UTF-8", "ja_JP.UTF-8"):
+        try:
+            _locale.setlocale(_locale.LC_TIME, cand)
+        except _locale.Error:
+            continue
+        if datetime.date(2024, 6, 3).strftime("%a") != "Mon":
+            chosen = cand
+            break
+    try:
+        if chosen is None:
+            pytest.skip("no non-English LC_TIME locale available to exercise the bug")
+
+        date = datetime.date(2024, 6, 3)  # Monday
+        values = [0.0] * 48
+        for i in range(34, 42):  # 17:00-21:00 Peak = the Mon-Fri source window
+            values[i] = 1.0
+        e1 = _make_e1(date, values)
+
+        config = ElasticityConfig(
+            source_windows=[
+                SourceWindow(
+                    schedule=[TimeRange(days=["Mon", "Tue", "Wed", "Thu", "Fri"],
+                                        start=dtime(17, 0), end=dtime(21, 0))],
+                    shift_fraction=0.5,
+                )
+            ],
+            target_window_name="Midday Power Saver",
+        )
+        simulated = LoadShiftSimulator().simulate(e1, smart_plan, config)
+
+        # Under the locale bug this is a silent no-op; with the fix, load moves
+        # out of the 17:00-21:00 source window into the midday target.
+        source_after = simulated["kwh"].iloc[34:42].sum()
+        assert source_after < sum(values[34:42]), (
+            "load-shift did not fire — weekday match is locale-dependent"
+        )
+        assert abs(e1["kwh"].sum() - simulated["kwh"].sum()) < 1e-9  # energy conserved
+    finally:
+        _locale.setlocale(_locale.LC_TIME, saved)
+
+
 def test_original_dataframe_not_mutated(smart_plan):
     """simulate() must return a new DataFrame, leaving the original untouched."""
     date = datetime.date(2024, 6, 3)

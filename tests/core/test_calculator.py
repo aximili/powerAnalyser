@@ -137,30 +137,29 @@ def test_free_window_within_cap(free_window_plan_dict):
 
 
 def test_free_window_cap_overflow():
-    """Free-window cap straddled mid-interval → overflow_tier branch fires.
+    """Free-window cap: the straddle spill AND all later post-cap usage bill at overflow_tier.
 
-    Regression guard for the ``overflow_kwh > 0`` block (calculator.py:144-146).
+    Guards two behaviours:
+      (1) the ``overflow_kwh > 0`` straddle block — the interval that crosses
+          the cap splits: the free portion is free, the spill bills at
+          ``overflow_tier``.
+      (2) once the daily cap is exhausted, *later* in-window intervals also bill
+          at ``overflow_tier`` — not the normal time-of-use / catch-all rate.
 
-    Why the old test was defective: it used 0.5 kWh intervals against a 1.5 kWh
-    cap (an exact multiple), so the cap was always consumed by whole intervals,
-    ``overflow_kwh`` was always 0, and the overflow_tier lookup branch never
-    ran — deleting lines 144-146 left it green. It also reused
-    ``overflow_tier="Standard"``, so even a hit could not expose a wrong
-    overflow rate (the rate under test equalled the catch-all rate).
+    Behaviour (2) is the consistency fix: post-cap billing used to be split —
+    only the straddling interval used ``overflow_tier`` while later in-window
+    intervals fell back to the active tier. The engine now bills ALL post-cap
+    in-window usage at ``overflow_tier`` (see ``calculator._calculate_day``).
 
-    This rewrite fixes both defects:
-      (a) 0.8 kWh intervals straddle the 1.5 kWh cap mid-interval, forcing
-          ``overflow_kwh = 0.1`` on the second in-window interval.
-      (b) a DISTINCT ``Overflow`` tier ($0.10) is the overflow target, so the
-          rate lookup is genuinely exercised. ``Standard`` ($0.30) remains the
-          catch-all — it is the first empty-schedule tier, so
-          ``_find_active_tier`` returns it; ``Overflow`` is reachable ONLY via
-          ``_find_tier_by_name(plan, fw.overflow_tier)``.
+    A DISTINCT ``Overflow`` tier ($0.10) is the overflow target, so the rate is
+    genuinely exercised. ``Standard`` ($0.30) is the catch-all / active in-window
+    tier; if post-cap usage wrongly fell back to it, total_usage would jump to
+    0.97 instead of 0.33.
 
     Plan (built inline because ``free_window_plan_dict`` hardcodes
     ``overflow_tier="Standard"``):
-      - Standard  $0.30  catch-all
-      - Overflow  $0.10  overflow target only
+      - Standard  $0.30  catch-all (the tier active in-window)
+      - Overflow  $0.10  overflow target
       - Free window 11:00-14:00, cap 1.5 kWh, overflow_tier="Overflow"
 
     Mon 2024-06-03; only the 6 free-window intervals (idx 22-27) carry load,
@@ -172,21 +171,20 @@ def test_free_window_cap_overflow():
       ---|-------|-----|------------|---------|------|----------|------------------|----------
       22 | 11:00 | 0.8 | 0.0        | True    | 0.8  | 0.0      | —                | 0.8×0.30 = 0.24
       23 | 11:30 | 0.8 | 0.8        | True    | 0.7  | 0.1      | 0.1×0.10 = 0.010 | 0.7×0.30 = 0.21
-      24 | 12:00 | 0.8 | 1.5        | False   |  —   |  —       | 0.8×0.30 = 0.24  | —
-      25 | 12:30 | 0.8 | 1.5        | False   |  —   |  —       | 0.8×0.30 = 0.24  | —
-      26 | 13:00 | 0.8 | 1.5        | False   |  —   |  —       | 0.8×0.30 = 0.24  | —
-      27 | 13:30 | 0.8 | 1.5        | False   |  —   |  —       | 0.8×0.30 = 0.24  | —
+      24 | 12:00 | 0.8 | 1.5        | cap!*   |  —   |  —       | 0.8×0.10 = 0.080 | —
+      25 | 12:30 | 0.8 | 1.5        | cap!*   |  —   |  —       | 0.8×0.10 = 0.080 | —
+      26 | 13:00 | 0.8 | 1.5        | cap!*   |  —   |  —       | 0.8×0.10 = 0.080 | —
+      27 | 13:30 | 0.8 | 1.5        | cap!*   |  —   |  —       | 0.8×0.10 = 0.080 | —
 
-      total_usage              = 0.010 + 4 × 0.24 = 0.970
-      total_promotional_saving = 0.24 + 0.21      = 0.450
-      total_net                = 1.00 + 0.97      = 1.970
+      (*) still inside the Midday window but the cap is exhausted → billed at
+          overflow_tier ($0.10), NOT the Standard catch-all ($0.30).
 
-    Subtlety pinned: interval i=24 is still inside the Midday time window, but
-    ``daily_promotional_usage`` (1.5) is no longer ``< cap`` (1.5), so it falls
-    through to the standard branch and bills at Standard $0.30 — NOT at
-    Overflow. The overflow_tier rate applies only to the mid-interval spill
-    (i=23); later full intervals use the catch-all. Invariant: this test MUST
-    fail if calculator.py:144-146 are deleted (then total_usage drops to 0.96).
+      total_usage              = 0.010 + 4 × 0.080 = 0.330
+      total_promotional_saving = 0.24 + 0.21       = 0.450
+      total_net                = 1.00 + 0.33       = 1.330
+
+    Invariant: this test MUST fail if post-cap in-window intervals revert to the
+    active/catch-all tier (then total_usage climbs to 0.97).
     """
     plan = ElectricityPlan.model_validate(
         {
@@ -222,10 +220,11 @@ def test_free_window_cap_overflow():
     meter = _make_meter(date, values)
     result = CostCalculator().calculate_period(meter, plan)
 
-    expected_usage = Decimal("0.1") * Decimal("0.10") + Decimal("4") * Decimal("0.8") * Decimal("0.30")
+    # 0.1 kWh straddle spill + 4 full post-cap intervals (0.8 each), ALL @ Overflow $0.10
+    expected_usage = Decimal("0.1") * Decimal("0.10") + Decimal("4") * Decimal("0.8") * Decimal("0.10")
     expected_saving = (Decimal("0.8") + Decimal("0.7")) * Decimal("0.30")
     assert result.total_usage == expected_usage
-    assert result.total_usage == Decimal("0.97")
+    assert result.total_usage == Decimal("0.33")
     assert result.total_promotional_saving == expected_saving
     assert result.total_promotional_saving == Decimal("0.45")
     assert result.total_net == Decimal("1.00") + expected_usage
@@ -842,6 +841,111 @@ def test_scheduled_fit_ignores_night_export(flat_rate_plan_dict):
     assert result.total_solar_credit == Decimal("1.0") * Decimal("0.10")
     assert result.total_usage == Decimal("0")
     assert result.total_net == Decimal("1.00") - Decimal("0.10")
+
+
+def test_fit_tier_order_independent_catchall_does_not_shadow_scheduled(flat_rate_plan_dict):
+    """A flat catch-all FiT listed FIRST must not shadow a time-varying tier.
+
+    Regression for the tier-ordering bug: `_find_active_fit_tier` used to return
+    the first empty-schedule tier immediately, so a plan authored as
+    [flat 0c catch-all, peak 3c 16:00-23:00] credited ALL export at 0c. This is
+    the exact shape of the shipped globird_four4free.json plan. Resolution must
+    prefer a matching scheduled tier and use the empty-schedule tier only as a
+    fallback (mirroring usage-tier resolution), regardless of list order.
+    """
+    from copy import deepcopy
+
+    plan_dict = deepcopy(flat_rate_plan_dict)
+    plan_dict["fit_tiers"] = [
+        {"name": "Flat catch-all", "rate": "0.00", "schedule": []},  # listed FIRST
+        {
+            "name": "Peak solar",
+            "rate": "0.03",
+            "schedule": [
+                {"days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                 "start": "16:00", "end": "23:00"}
+            ],
+        },
+    ]
+    plan = ElectricityPlan.model_validate(plan_dict)
+
+    date = datetime.date(2024, 6, 5)  # a Wednesday
+    b1 = [0.0] * 48
+    b1[36] = 2.0   # 18:00 export → inside 16:00-23:00 peak window → 3c
+    b1[24] = 2.0   # 12:00 export → outside peak → flat catch-all 0c
+    meter = _make_meter(date, [0.0] * 48, b1)
+
+    result = CostCalculator().calculate_period(meter, plan)
+
+    # 2 kWh @ 3c (peak) + 2 kWh @ 0c (catch-all) = $0.06
+    assert result.total_solar_credit == Decimal("2.0") * Decimal("0.03")
+
+
+def test_volume_tiered_fit_splits_daily_export_at_threshold(flat_rate_plan_dict):
+    """Volume-tiered FiT (fit_steps): premium rate on the first N kWh/day exported, lower after.
+
+    Models "8c on the first 2.5 kWh/day exported, 4c beyond" — a common
+    post-deregulation shape. The cumulative daily-export threshold is crossed
+    mid-interval, so the crossing interval splits across the two credit rates.
+    """
+    from copy import deepcopy
+
+    plan_dict = deepcopy(flat_rate_plan_dict)
+    plan_dict["fit_tiers"] = [
+        {"name": "Premium", "rate": "0.08", "schedule": []},
+        {"name": "Excess", "rate": "0.04", "schedule": []},
+    ]
+    plan_dict["fit_steps"] = [
+        {"threshold_kwh_per_day": 2.5, "tier_below": "Premium", "tier_above": "Excess"}
+    ]
+    plan = ElectricityPlan.model_validate(plan_dict)
+
+    date = datetime.date(2024, 6, 5)
+    b1 = [0.0] * 48
+    for i in (20, 21, 22, 23):  # 4 x 1.0 kWh = 4.0 kWh exported across the day
+        b1[i] = 1.0
+    meter = _make_meter(date, [0.0] * 48, b1)
+
+    result = CostCalculator().calculate_period(meter, plan)
+
+    # first 2.5 kWh @ 0.08 (=0.20) + remaining 1.5 kWh @ 0.04 (=0.06) = 0.26
+    expected = Decimal("2.5") * Decimal("0.08") + Decimal("1.5") * Decimal("0.04")
+    assert result.total_solar_credit == expected
+    assert result.total_solar_credit == Decimal("0.26")
+
+
+def test_volume_tiered_fit_threshold_resets_each_day(flat_rate_plan_dict):
+    """The daily-export accumulator for fit_steps must reset each calendar day.
+
+    Two identical days each export 4 kWh; each day independently gets the first
+    2.5 kWh at premium — the premium allowance must NOT be consumed across the
+    day boundary.
+    """
+    from copy import deepcopy
+
+    plan_dict = deepcopy(flat_rate_plan_dict)
+    plan_dict["fit_tiers"] = [
+        {"name": "Premium", "rate": "0.08", "schedule": []},
+        {"name": "Excess", "rate": "0.04", "schedule": []},
+    ]
+    plan_dict["fit_steps"] = [
+        {"threshold_kwh_per_day": 2.5, "tier_below": "Premium", "tier_above": "Excess"}
+    ]
+    plan = ElectricityPlan.model_validate(plan_dict)
+
+    day_export = [0.0] * 48
+    for i in (20, 21, 22, 23):
+        day_export[i] = 1.0
+    d1, d2 = datetime.date(2024, 6, 5), datetime.date(2024, 6, 6)
+    meter = _make_multi_day_meter(
+        {d1: [0.0] * 48, d2: [0.0] * 48},
+        {d1: list(day_export), d2: list(day_export)},
+    )
+
+    result = CostCalculator().calculate_period(meter, plan)
+
+    # 0.26 per day x 2 days = 0.52 (not 0.20 + 3.5*0.04 if the accumulator leaked)
+    assert result.total_solar_credit == Decimal("2") * Decimal("0.26")
 
 
 def test_export_without_fit_tiers_no_credit(flat_rate_plan_dict):

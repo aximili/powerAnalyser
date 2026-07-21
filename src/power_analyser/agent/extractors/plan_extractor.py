@@ -66,7 +66,8 @@ _SCHEMA_BLOCK = """{
   "free_windows": [],                          // promotional $0 windows, if any
   "fit_tiers": [{"name": "Solar FiT", "rate": "0.0500", "schedule": []}],
   "conditions": [],                            // eligibility strings, e.g. "Direct debit required"
-  "step_tariffs": []
+  "step_tariffs": [],
+  "fit_steps": []                              // volume-tiered feed-in only (see rules); else []
 }"""
 
 _EXTRACT_PROMPT = """You are an expert at extracting Australian electricity plan pricing data from a web page.
@@ -85,6 +86,8 @@ RULES:
 - An EMPTY "schedule" array means the tier applies at ALL times (a flat rate). Only fill in a schedule for time-of-use tiers.
 - If a plan has no solar feed-in tariff, set "fit_tiers": [].
 - If a plan has no free windows or step tariffs, set those to [].
+- Enter the EFFECTIVE (already-discounted) rates the customer actually pays, and record any discount/eligibility requirement in "conditions" (there is no separate discount field).
+- "fit_steps": ONLY when the feed-in rate depends on how much is exported per day (e.g. "8c on the first 10 kWh/day exported, 4c after"). Then add two fit_tiers and one fit_steps entry: {"threshold_kwh_per_day": 10, "tier_below": "<premium fit name>", "tier_above": "<lower fit name>"}. Otherwise set "fit_steps": [].
 - "conditions": capture any eligibility/discount requirements stated for these rates as short strings, e.g. ["Direct debit required", "Pay-on-time discount included"]. Use [] if none are stated.
 - Build "plan_id" from the retailer and plan name in snake_case.
 - If a value is genuinely not shown, OMIT guessing supply/usage numbers — but still output the plan with whatever rates ARE visible.

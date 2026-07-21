@@ -4,6 +4,24 @@ This document covers the AI browser agent component (Part 2) of Power Analyser.
 
 ---
 
+## Purpose (what this app is for)
+
+Power Analyser helps a household find the **best-value Victorian (Australia)
+electricity plan for their own usage pattern** over a chosen part of the year
+(e.g. summer), based on their **previous year's** smart-meter (NEM12) data.
+Victorian retail electricity plans vary wildly and are notoriously hard to read
+and compare like-for-like; this tool does the apples-to-apples cost simulation
+so the user doesn't have to.
+
+Because the ranked output drives a real purchasing decision, **ranking accuracy
+is the product**: a misparsed plan or a miscalculated cost can steer a user onto
+a more expensive plan — a real financial loss. Correctly modelling the full
+diversity of real VIC tariff structures (ToU, stepped/block, free windows,
+time-varying + volume-tiered FiT, controlled load, demand charges, conditional
+discounts) is therefore a core requirement, not a nice-to-have.
+
+---
+
 ## Workflow for AI agents (read first)
 
 When changing any code in this repository:
@@ -68,6 +86,25 @@ Reflect **only** when the change affects at least one of:
   averaging; weekday-specific ToU is smoothed (known limitation).
 - **`conditions`**: discount-gating strings must flow from the page into the
   schema during extraction.
+- **Weekday derivation**: always `_WEEKDAY_NAMES[ts.weekday()]` (locale-
+  independent), never `strftime("%a")` — the latter silently breaks schedule
+  matching on non-English locales. Applies to `calculator.py` AND
+  `elasticity.py`.
+- **FiT resolution is order-independent**: a matching scheduled `FiTTier` wins;
+  an empty-schedule tier is only a fallback (`_find_active_fit_tier`), exactly
+  like usage tiers. A flat catch-all listed first must NOT shadow a
+  time-varying rate.
+- **Volume-tiered FiT (`fit_steps`)** resolves by cumulative daily *export* and
+  is a **separate mode** from time-varying FiT — when `fit_steps` is set, the
+  FiT tiers' `schedule` is ignored.
+- **Free-window overflow**: once a free window's daily cap is exhausted, ALL
+  further in-window usage bills at `overflow_tier` (not the active ToU tier),
+  consistent with the cap-crossing interval.
+- **Discounts are a convention, not code**: plans carry the *effective*
+  (already-discounted) rates; `conditions` documents the requirement. Do not add
+  percentage-discount math without an explicit product decision. Controlled
+  load, demand charges, seasonal rates, per-quarter blocks, one-off credits and
+  wholesale/spot plans are out of scope (see `docs/plan-schema.md`).
 
 ### Output format
 

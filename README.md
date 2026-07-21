@@ -12,7 +12,7 @@ An optional AI agent (Part 2) can autonomously browse retailer websites and extr
 
 - **NEM12 parsing** — handles variable-length DST days (46 or 50 intervals), E1 consumption and B1 solar export
 - **Analysis period selection + multi-year averaging** — analyse **All available** data or a **Custom** day/month window (with year-end wrap-around, e.g. 1/12–28/2). When your file spans multiple years, matching calendar days are averaged so a seasonal pick uses every year. Period total + $/day; no forced annualization.
-- **Tariff types** — flat rate, time-of-use, 3-part "smart rate", free midday windows (with fair-use caps), solar feed-in, step tariffs
+- **Tariff types** — flat rate, time-of-use, 3-part "smart rate", free midday windows (with fair-use caps), solar feed-in (flat, time-varying, or volume-tiered), step tariffs
 - **Load-shift simulation** — move EV charging / pool pump into free or cheap windows; see how much you save
 - **Ranked comparison** — plans sorted by net annual cost with per-plan supply / usage / solar breakdown
 - **AI browser agent** — navigates retailer websites, fills suburb/usage forms, extracts plan pricing (supports Ollama, GLM/Zhipu AI, OpenAI-compatible APIs); with screenshot fallback + a self-repair extraction pass for smaller local models
@@ -153,6 +153,25 @@ Key rules (full detail in [`docs/plan-schema.md`](docs/plan-schema.md)):
 - Day names: `Mon Tue Wed Thu Fri Sat Sun`; times in 24-hour `HH:MM`; overnight windows wrap midnight when `end <= start`
 - `overflow_tier` / `tier_below` / `tier_above` must match an existing `usage_tiers[].name`
 - Optional informational fields: `valid_from`/`valid_to`, `last_updated` (ISO-8601 capture time — auto-stamped by the agent), and `conditions` (e.g. `["Direct debit required"]`)
+
+---
+
+## Modelling scope & conventions
+
+The engine costs the tariff structures that drive VIC residential plan choice:
+supply charge, flat / time-of-use / 3-part usage, daily step (block) tariffs,
+free windows with caps, and solar feed-in (flat, time-varying, and
+volume-tiered via `fit_steps`).
+
+A few things are handled by **convention** or left **out of scope** to keep the
+app simple and robust (full detail in [`docs/plan-schema.md`](docs/plan-schema.md)):
+
+- **Discounts** — no discount engine. Enter the **effective (discounted) rates**
+  you expect to pay and note the requirement in `conditions`.
+- **Not modelled** — controlled load / dedicated circuits (only E1 + B1 streams
+  are read), demand charges (VIC residential demand tariffs retire 1 Jul 2026),
+  seasonal rates, per-quarter block thresholds, one-off sign-up credits, and
+  wholesale/spot pass-through plans (e.g. Amber).
 
 ---
 

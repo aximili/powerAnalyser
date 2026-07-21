@@ -1,0 +1,25 @@
+{
+  "plan_id": "sample_volume_tiered_fit",
+  "retailer": "Sample Retailer E",
+  "plan_name": "Solar Saver (Volume-Tiered Feed-in)",
+  "valid_from": "2025-07-01",
+  "valid_to": "2026-06-30",
+  "conditions": ["Premium feed-in applies to the first 10 kWh exported per day"],
+  "daily_supply_charge": "0.9500",
+  "usage_tiers": [
+    { "name": "Flat", "rate": "0.2800", "schedule": [] }
+  ],
+  "free_windows": [],
+  "fit_tiers": [
+    { "name": "Premium export", "rate": "0.0800", "schedule": [] },
+    { "name": "Excess export", "rate": "0.0400", "schedule": [] }
+  ],
+  "step_tariffs": [],
+  "fit_steps": [
+    {
+      "threshold_kwh_per_day": 10.0,
+      "tier_below": "Premium export",
+      "tier_above": "Excess export"
+    }
+  ]
+}

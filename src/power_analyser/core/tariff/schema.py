@@ -136,6 +136,35 @@ class StepTariff(BaseModel):
         return self
 
 
+class FiTStep(BaseModel):
+    """A daily EXPORT threshold that changes the feed-in credit rate.
+
+    The FiT analogue of :class:`StepTariff`. Once cumulative daily *export*
+    exceeds ``threshold_kwh_per_day``, the interval that crosses the threshold
+    is split: export below the threshold is credited at ``tier_below`` and
+    export above at ``tier_above`` (both naming a ``FiTTier``). This models the
+    common post-deregulation shape "premium feed-in on the first N kWh/day
+    exported, lower rate after" (e.g. 8c on the first 10 kWh/day, 4c beyond).
+
+    Volume-tiered FiT (``fit_steps``) and time-varying FiT (``FiTTier.schedule``)
+    are separate modes: when ``fit_steps`` is present the calculator resolves
+    FiT purely by export volume and the referenced tiers' schedules are ignored.
+    """
+
+    threshold_kwh_per_day: float = Field(gt=0)
+    tier_below: str = Field(description="FiTTier.name credited for export below the threshold")
+    tier_above: str = Field(description="FiTTier.name credited for export above the threshold")
+
+    @model_validator(mode="after")
+    def _validate_tiers_differ(self) -> "FiTStep":
+        if self.tier_below == self.tier_above:
+            raise ValueError(
+                f"FiTStep tier_below and tier_above must differ; both are '{self.tier_below}'. "
+                "A step where both sides use the same FiT tier has no effect."
+            )
+        return self
+
+
 class ElectricityPlan(BaseModel):
     """Top-level model representing one retail electricity offer.
 
@@ -158,10 +187,11 @@ class ElectricityPlan(BaseModel):
     free_windows: list[FreeWindow] = Field(default_factory=list)
     fit_tiers: list[FiTTier] = Field(default_factory=list)
     step_tariffs: list[StepTariff] = Field(default_factory=list)
+    fit_steps: list[FiTStep] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_tier_references(self) -> "ElectricityPlan":
-        """Ensure all tier name references actually exist in usage_tiers."""
+        """Ensure all tier name references actually exist in usage_tiers / fit_tiers."""
         tier_names = {t.name for t in self.usage_tiers}
 
         for fw in self.free_windows:
@@ -177,5 +207,14 @@ class ElectricityPlan(BaseModel):
                     raise ValueError(
                         f"StepTariff references unknown {attr} '{name}'. "
                         f"Known tiers: {sorted(tier_names)}"
+                    )
+        fit_names = {f.name for f in self.fit_tiers}
+        for fs in self.fit_steps:
+            for attr in ("tier_below", "tier_above"):
+                name = getattr(fs, attr)
+                if name not in fit_names:
+                    raise ValueError(
+                        f"FiTStep references unknown {attr} '{name}'. "
+                        f"Known FiT tiers: {sorted(fit_names)}"
                     )
         return self

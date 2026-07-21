@@ -23,7 +23,15 @@ from decimal import Decimal
 import pandas as pd
 
 from ..ingestion.pipeline import MeterDataSet
-from ..tariff.schema import ElectricityPlan, FiTTier, FreeWindow, StepTariff, TimeRange, UsageTier
+from ..tariff.schema import (
+    ElectricityPlan,
+    FiTStep,
+    FiTTier,
+    FreeWindow,
+    StepTariff,
+    TimeRange,
+    UsageTier,
+)
 
 # Locale-independent weekday names matching the DayOfWeek literals in schema.py.
 # pd.Timestamp.weekday() returns 0 for Monday through 6 for Sunday.
@@ -112,10 +120,16 @@ class CostCalculator:
         # Running totals used for step-tariff and free-window cap tracking.
         daily_consumption_total = Decimal("0")
         daily_promotional_usage = Decimal("0")
+        # Cumulative daily export, used for volume-tiered FiT (fit_steps).
+        daily_export_total = Decimal("0")
 
         # All step tariffs sorted ascending by threshold; passed to _apply_usage_with_step.
         steps: list[StepTariff] = sorted(
             plan.step_tariffs, key=lambda s: s.threshold_kwh_per_day
+        )
+        # FiT volume steps sorted ascending by export threshold (if any).
+        fit_steps: list[FiTStep] = sorted(
+            plan.fit_steps, key=lambda s: s.threshold_kwh_per_day
         )
 
         # B1 export keyed by timestamp for correct per-interval FiT matching.
@@ -139,6 +153,15 @@ class CostCalculator:
                 promotional_saving += interval_promo
                 # Overflow kWh is regular billable consumption and advances the step accumulator.
                 daily_consumption_total += overflow_kwh
+            elif fw is not None:
+                # Free window active but the daily cap is already exhausted: the
+                # whole interval is billed at the window's overflow_tier — the
+                # same rate the cap-crossing interval uses — so post-cap billing
+                # is consistent. overflow_tier is guaranteed set when a cap
+                # exists (schema enforces), which is the only way to reach here.
+                overflow_tier = _find_tier_by_name(plan, fw.overflow_tier)
+                usage += kwh_dec * overflow_tier.rate
+                daily_consumption_total += kwh_dec
             else:
                 # ── Standard tier with step-tariff logic ─────────────────────
                 # Free-window kWh (daily_promotional_usage) is intentionally
@@ -152,7 +175,16 @@ class CostCalculator:
             # ── Solar FiT — matched by timestamp, not position ────────────────
             b1_kwh_raw = float(b1_kwh_by_ts.get(ts, 0.0))
             if b1_kwh_raw > 0:
-                solar_credit += _apply_fit(plan, dow, t, Decimal(str(b1_kwh_raw)))
+                b1_kwh_dec = Decimal(str(b1_kwh_raw))
+                if fit_steps:
+                    # Volume-tiered FiT: credit by cumulative daily export.
+                    credit, daily_export_total = _apply_fit_with_step(
+                        plan, b1_kwh_dec, daily_export_total, fit_steps
+                    )
+                    solar_credit += credit
+                else:
+                    # Time-varying (or flat) FiT: credit by time of day.
+                    solar_credit += _apply_fit(plan, dow, t, b1_kwh_dec)
 
         return DailyCost(
             date=date,
@@ -313,6 +345,54 @@ def _apply_fit(
     return b1_kwh * fit.rate if fit else Decimal("0")
 
 
+def _apply_fit_with_step(
+    plan: ElectricityPlan,
+    b1_kwh: Decimal,
+    daily_export_total: Decimal,
+    fit_steps: list[FiTStep],
+) -> tuple[Decimal, Decimal]:
+    """Credit ``b1_kwh`` of export using volume-tiered FiT (``fit_steps``).
+
+    Returns ``(credit, new_daily_export_total)``. Mirrors
+    ``_apply_usage_with_step`` but accumulates on daily *export* and looks up
+    rates from ``fit_tiers`` by name (so the result is independent of the order
+    tiers are listed). ``fit_steps`` must be sorted ascending by threshold.
+
+    Export bands (steps sorted ascending):
+      [0,            steps[0].threshold) → steps[0].tier_below
+      [steps[0],     steps[1].threshold) → steps[0].tier_above
+      ...
+      [steps[-1].threshold, ∞)          → steps[-1].tier_above
+
+    Time-of-day FiT schedules are not consulted on this path — volume-tiered
+    and time-varying FiT are separate modes (see :class:`FiTStep`).
+    """
+    remaining = b1_kwh
+    pos = daily_export_total
+    credit = Decimal("0")
+
+    for i, step in enumerate(fit_steps):
+        threshold = Decimal(str(step.threshold_kwh_per_day))
+        if pos >= threshold:
+            continue  # already above this export band
+        in_band = threshold - pos
+        name = step.tier_below if i == 0 else fit_steps[i - 1].tier_above
+        rate = _find_fit_tier_by_name(plan, name).rate
+        if remaining <= in_band:
+            credit += remaining * rate
+            remaining = Decimal("0")
+            break
+        credit += in_band * rate
+        remaining -= in_band
+        pos = threshold
+
+    if remaining > Decimal("0"):
+        # Above all export thresholds.
+        credit += remaining * _find_fit_tier_by_name(plan, fit_steps[-1].tier_above).rate
+
+    return credit, daily_export_total + b1_kwh
+
+
 # ── Tariff resolution helpers ──────────────────────────────────────────────────
 
 
@@ -347,6 +427,14 @@ def _find_tier_by_name(plan: ElectricityPlan, name: str) -> UsageTier:
     raise ValueError(f"UsageTier '{name}' not found in plan '{plan.plan_id}'")
 
 
+def _find_fit_tier_by_name(plan: ElectricityPlan, name: str) -> FiTTier:
+    """Look up a FiTTier by name (guaranteed valid after schema validation)."""
+    for fit in plan.fit_tiers:
+        if fit.name == name:
+            return fit
+    raise ValueError(f"FiTTier '{name}' not found in plan '{plan.plan_id}'")
+
+
 def _find_active_free_window(
     plan: ElectricityPlan, dow: str, t: datetime.time
 ) -> FreeWindow | None:
@@ -360,11 +448,25 @@ def _find_active_free_window(
 def _find_active_fit_tier(
     plan: ElectricityPlan, dow: str, t: datetime.time
 ) -> FiTTier | None:
-    """Return the active FiT tier for this day/time, or None if no FiT."""
+    """Return the active FiT tier for this day/time, or None if no FiT.
+
+    Mirrors ``_find_active_tier``: a time-specific tier (non-empty schedule)
+    whose window matches wins; an empty-schedule tier is only used as a
+    catch-all *fallback* when no scheduled tier matches. Resolving this way
+    makes the result independent of the order tiers happen to appear in the
+    plan JSON — both hand-authored files and LLM extraction produce arbitrary
+    orderings, and a flat catch-all listed first must not shadow a
+    time-varying (e.g. peak) FiT rate listed after it.
+    """
+    fallback: FiTTier | None = None
     for fit in plan.fit_tiers:
-        if not fit.schedule or _interval_in_schedule(dow, t, fit.schedule):
+        if not fit.schedule:
+            if fallback is None:
+                fallback = fit
+            continue
+        if _interval_in_schedule(dow, t, fit.schedule):
             return fit
-    return None
+    return fallback
 
 
 def _interval_in_schedule(dow: str, t: datetime.time, schedule: list[TimeRange]) -> bool:
