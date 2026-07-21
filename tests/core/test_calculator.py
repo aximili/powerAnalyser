@@ -1033,6 +1033,198 @@ def test_free_window_consumption_should_not_consume_step_threshold():
     assert result.total_net == Decimal("1.00") + Decimal("2.0") * Decimal("0.10")  # 1.20
 
 
+def test_free_window_overflow_advances_step_accumulator():
+    """H5 regression: overflow kWh from a capped free window must count toward the
+    step-tariff accumulator, so subsequent non-free intervals can cross the threshold.
+
+    Plan (synthetic):
+      - Cheap     $0.10  catch-all  (below-threshold rate)
+      - Expensive $0.50  catch-all  (above-threshold rate)
+      - Overflow  $0.20  catch-all  (overflow-tier for the free window)
+      - Free window "Midday" 11:00-13:00 (all days), cap 2.0 kWh/day,
+        overflow_tier="Overflow"
+      - Step tariff: threshold 3.0 kWh/day, tier_below="Cheap", tier_above="Expensive"
+
+    Mon 2024-06-03. Only two intervals carry load:
+      - idx 22 (11:00): 3.5 kWh — in free window, straddles cap
+      - idx 23 (11:30): 2.0 kWh — cap exhausted → standard branch
+
+    Hand-math (with Fix 1: overflow_kwh advances the step accumulator):
+
+      idx 22 (11:00) — free window, cap not exhausted (0.0 < 2.0):
+        free_kwh = min(3.5, 2.0) = 2.0;  overflow_kwh = 1.5
+        overflow_cost = 1.5 × $0.20 = $0.30
+        promo_saving: dct=0.0, dct+free=2.0 < threshold=3.0 → all Cheap
+          = 2.0 × $0.10 = $0.20
+        Fix 1: daily_consumption_total += 1.5 → dct = 1.5
+        daily_promotional_usage = 2.0
+
+      idx 23 (11:30) — cap exhausted (2.0 ≥ 2.0) → standard branch:
+        pos=1.5, threshold=3.0, in_band=1.5; remaining=2.0 > in_band → SPLIT
+          below: 1.5 kWh × $0.10 = $0.15
+          above: 0.5 kWh × $0.50 = $0.25
+        cost = $0.40;  dct = 3.5
+
+      All other intervals: 0.0 kWh → no cost.
+
+      total_usage              = $0.30 + $0.40 = $0.70
+      total_promotional_saving = $0.20
+      total_net                = $1.00 + $0.70 = $1.70
+
+    Without Fix 1 (bug): dct=0.0 when idx 23 runs → in_band=3.0 → no split
+      → cost = 2.0 × $0.10 = $0.20 → total_usage = $0.50 (under-bills by $0.20).
+    The assertion on total_usage pins that the step split fires at idx 23,
+    proving overflow_kwh was counted toward the 3.0 kWh threshold.
+    """
+    plan = ElectricityPlan.model_validate(
+        {
+            "plan_id": "h5_regression",
+            "retailer": "Test Retailer",
+            "plan_name": "H5: Free Window Overflow + Step",
+            "daily_supply_charge": "1.00",
+            "usage_tiers": [
+                {"name": "Cheap",     "rate": "0.10", "schedule": []},
+                {"name": "Expensive", "rate": "0.50", "schedule": []},
+                {"name": "Overflow",  "rate": "0.20", "schedule": []},
+            ],
+            "free_windows": [
+                {
+                    "name": "Midday",
+                    "schedule": [
+                        {
+                            "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                            "start": "11:00",
+                            "end": "13:00",
+                        }
+                    ],
+                    "fair_use_cap_kwh": 2.0,
+                    "overflow_tier": "Overflow",
+                }
+            ],
+            "step_tariffs": [
+                {"threshold_kwh_per_day": 3.0, "tier_below": "Cheap", "tier_above": "Expensive"}
+            ],
+        }
+    )
+    date = datetime.date(2024, 6, 3)  # Monday
+    values = [0.0] * 48
+    values[22] = 3.5   # 11:00 — straddles cap, overflow_kwh=1.5
+    values[23] = 2.0   # 11:30 — cap exhausted, must cross threshold when counted
+
+    meter = _make_meter(date, values)
+    result = CostCalculator().calculate_period(meter, plan)
+
+    # idx 22: overflow cost
+    expected_overflow_cost = Decimal("1.5") * Decimal("0.20")  # $0.30
+
+    # idx 23: step split fires because overflow_kwh (1.5) was added to dct
+    #   below portion: (3.0 - 1.5) = 1.5 kWh @ Cheap $0.10 = $0.15
+    #   above portion: (2.0 - 1.5) = 0.5 kWh @ Expensive $0.50 = $0.25
+    expected_split_cost = Decimal("1.5") * Decimal("0.10") + Decimal("0.5") * Decimal("0.50")
+
+    expected_usage = expected_overflow_cost + expected_split_cost
+    assert result.total_usage == expected_usage
+    assert result.total_usage == Decimal("0.70"), (
+        "Step split must fire at idx 23 because overflow_kwh (1.5) advanced dct to 1.5. "
+        "total_usage == $0.50 means the split did NOT fire (H5 bug still present)."
+    )
+    assert result.total_promotional_saving == Decimal("2.0") * Decimal("0.10")  # $0.20
+    assert result.total_net == Decimal("1.00") + expected_usage
+
+
+def test_free_window_overflow_promo_saving_is_step_aware():
+    """L1 regression: promotional_saving must use the step-aware rate for the
+    above-threshold portion of free_kwh, not just the flat ToU rate.
+
+    Same plan as test_free_window_overflow_advances_step_accumulator.
+    Here the free window fires while daily_consumption_total is already
+    partially through the step band, so free_kwh spans the threshold.
+
+    Mon 2024-06-03. Two intervals carry load:
+      - idx 0  (00:00): 2.0 kWh — pre-free-window, standard branch
+      - idx 22 (11:00): 3.5 kWh — free window, straddles cap
+
+    Hand-math:
+
+      idx 0 (00:00) — standard branch:
+        pos=0.0, threshold=3.0, in_band=3.0; remaining=2.0 ≤ in_band → all Cheap
+        cost = 2.0 × $0.10 = $0.20;  dct = 2.0
+
+      idx 22 (11:00) — free window, cap not exhausted (0.0 < 2.0):
+        free_kwh = 2.0;  overflow_kwh = 1.5
+        overflow_cost = 1.5 × $0.20 = $0.30
+
+        Step-aware promo_saving (dct=2.0, threshold=3.0, free_kwh=2.0):
+          dct+free = 4.0 > threshold=3.0 → split at 3.0
+          below_kwh = 3.0 - 2.0 = 1.0 kWh  @ Cheap     $0.10 = $0.10
+          above_kwh = 2.0 - 1.0 = 1.0 kWh  @ Expensive $0.50 = $0.50
+          promo_saving = $0.60
+
+        Fix 1: dct += 1.5 → dct = 3.5
+
+      All other intervals: 0.0 kWh.
+
+      total_usage              = $0.20 + $0.30 = $0.50
+      total_promotional_saving = $0.60
+      total_net                = $1.00 + $0.50 = $1.50
+
+    Without L1 fix (bug): promo_saving = 2.0 × $0.10 = $0.20 (flat ToU, understated).
+    The assertion pins $0.60 — the correct step-aware value.
+    """
+    plan = ElectricityPlan.model_validate(
+        {
+            "plan_id": "l1_regression",
+            "retailer": "Test Retailer",
+            "plan_name": "L1: Step-Aware Promo Saving",
+            "daily_supply_charge": "1.00",
+            "usage_tiers": [
+                {"name": "Cheap",     "rate": "0.10", "schedule": []},
+                {"name": "Expensive", "rate": "0.50", "schedule": []},
+                {"name": "Overflow",  "rate": "0.20", "schedule": []},
+            ],
+            "free_windows": [
+                {
+                    "name": "Midday",
+                    "schedule": [
+                        {
+                            "days": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+                            "start": "11:00",
+                            "end": "13:00",
+                        }
+                    ],
+                    "fair_use_cap_kwh": 2.0,
+                    "overflow_tier": "Overflow",
+                }
+            ],
+            "step_tariffs": [
+                {"threshold_kwh_per_day": 3.0, "tier_below": "Cheap", "tier_above": "Expensive"}
+            ],
+        }
+    )
+    date = datetime.date(2024, 6, 3)  # Monday
+    values = [0.0] * 48
+    values[0]  = 2.0   # 00:00 — pre-free-window, pushes dct to 2.0
+    values[22] = 3.5   # 11:00 — free_kwh=2.0 spans threshold at 3.0
+
+    meter = _make_meter(date, values)
+    result = CostCalculator().calculate_period(meter, plan)
+
+    # promo_saving splits free_kwh=2.0 at threshold=3.0, from pos=2.0:
+    #   below: (3.0 - 2.0) = 1.0 kWh @ Cheap $0.10 = $0.10
+    #   above: (2.0 - 1.0) = 1.0 kWh @ Expensive $0.50 = $0.50
+    expected_promo_saving = Decimal("1.0") * Decimal("0.10") + Decimal("1.0") * Decimal("0.50")
+    assert result.total_promotional_saving == expected_promo_saving
+    assert result.total_promotional_saving == Decimal("0.60"), (
+        "Promotional saving must use the step-aware rate. "
+        "$0.20 means the flat ToU rate was used for all free_kwh (L1 bug still present)."
+    )
+
+    expected_usage = Decimal("2.0") * Decimal("0.10") + Decimal("1.5") * Decimal("0.20")
+    assert result.total_usage == expected_usage
+    assert result.total_usage == Decimal("0.50")
+    assert result.total_net == Decimal("1.00") + expected_usage
+
+
 def test_second_step_tariff_is_applied():
     """Both step_tariffs are evaluated; the engine iterates all steps in threshold order.
 

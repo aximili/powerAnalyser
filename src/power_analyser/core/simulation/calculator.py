@@ -129,22 +129,21 @@ class CostCalculator:
             # ── Promotional / free-window check ──────────────────────────────
             fw = _find_active_free_window(plan, dow, t)
             if fw is not None and _cap_not_exhausted(fw, daily_promotional_usage):
-                interval_cost, interval_promo, daily_promotional_usage = (
-                    _apply_free_window_interval(fw, plan, dow, t, kwh_dec, daily_promotional_usage)
+                interval_cost, interval_promo, daily_promotional_usage, overflow_kwh = (
+                    _apply_free_window_interval(
+                        fw, plan, dow, t, kwh_dec, daily_promotional_usage,
+                        daily_consumption_total, steps,
+                    )
                 )
                 usage += interval_cost
                 promotional_saving += interval_promo
+                # Overflow kWh is regular billable consumption and advances the step accumulator.
+                daily_consumption_total += overflow_kwh
             else:
                 # ── Standard tier with step-tariff logic ─────────────────────
                 # Free-window kWh (daily_promotional_usage) is intentionally
                 # excluded from the step accumulator so that free usage cannot
                 # consume a consumer's off-peak step allowance.
-                # OPEN QUESTION (H5): overflow kWh (billed at overflow_tier) is
-                # also excluded here. On plans that combine a free window with a
-                # step threshold, overflow amounts never advance the step
-                # accumulator. Whether overflow *should* count is a design
-                # ambiguity; leave as-is until a plan with this combination
-                # is confirmed in production.
                 interval_cost, daily_consumption_total = _apply_usage_with_step(
                     plan, dow, t, kwh_dec, daily_consumption_total, steps
                 )
@@ -191,14 +190,19 @@ def _apply_free_window_interval(
     t: datetime.time,
     kwh: Decimal,
     daily_promo_used: Decimal,
-) -> tuple[Decimal, Decimal, Decimal]:
+    daily_consumption_total: Decimal,
+    steps: list[StepTariff],
+) -> tuple[Decimal, Decimal, Decimal, Decimal]:
     """Apply one interval's free-window logic.
 
-    Returns ``(usage_cost, promotional_saving, new_daily_promo_used)``.
+    Returns ``(usage_cost, promotional_saving, new_daily_promo_used, overflow_kwh)``.
 
     ``usage_cost`` is non-zero only when this interval straddles the cap
     boundary and has overflow kWh billed at ``fw.overflow_tier``.
-    ``promotional_saving`` is the avoided cost for the free portion.
+    ``overflow_kwh`` is non-zero only when the interval straddles the cap; callers
+    must add it to the step-tariff accumulator.
+    ``promotional_saving`` is the avoided cost for the free portion, computed with
+    step-tariff awareness so heavy users see the correct counterfactual saving.
     """
     cap = Decimal(str(fw.fair_use_cap_kwh)) if fw.fair_use_cap_kwh is not None else None
     remaining = (cap - daily_promo_used) if cap is not None else kwh
@@ -206,15 +210,42 @@ def _apply_free_window_interval(
     overflow_kwh = kwh - free_kwh
 
     new_promo_used = daily_promo_used + free_kwh
-    base_rate = _find_active_tier(plan, dow, t).rate
-    promo_saving = free_kwh * base_rate
+
+    # Step-aware promotional saving: what free_kwh would have cost at standard
+    # rates, accounting for step-tariff bands already consumed this day.
+    # Uses daily_consumption_total before this interval's overflow is counted.
+    if steps:
+        rem = free_kwh
+        pos = daily_consumption_total
+        promo_saving = Decimal("0")
+        for i, step in enumerate(steps):
+            threshold = Decimal(str(step.threshold_kwh_per_day))
+            if pos >= threshold:
+                continue
+            in_band = threshold - pos
+            rate = (
+                _find_active_tier(plan, dow, t).rate
+                if i == 0
+                else _find_tier_by_name(plan, steps[i - 1].tier_above).rate
+            )
+            if rem <= in_band:
+                promo_saving += rem * rate
+                rem = Decimal("0")
+                break
+            promo_saving += in_band * rate
+            rem -= in_band
+            pos = threshold
+        if rem > Decimal("0"):
+            promo_saving += rem * _find_tier_by_name(plan, steps[-1].tier_above).rate
+    else:
+        promo_saving = free_kwh * _find_active_tier(plan, dow, t).rate
 
     overflow_cost = Decimal("0")
     if overflow_kwh > 0 and fw.overflow_tier is not None:
         overflow_tier = _find_tier_by_name(plan, fw.overflow_tier)
         overflow_cost = overflow_kwh * overflow_tier.rate
 
-    return overflow_cost, promo_saving, new_promo_used
+    return overflow_cost, promo_saving, new_promo_used, overflow_kwh
 
 
 def _apply_usage_with_step(
