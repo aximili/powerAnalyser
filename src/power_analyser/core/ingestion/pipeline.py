@@ -6,8 +6,9 @@ identical datetime index in Australia/Melbourne local time.
 
 DST handling:
   Spring-forward (Oct): 46 intervals on that day.
-    → The 2 intervals at 02:00–02:30 don't exist; they are interpolated as
-      the average of their neighbours and flagged in MeterDataSet.warnings.
+    → The 2 intervals at 02:00–02:30 don't exist in local time; the day
+      naturally has only 46 slots.  A tz-aware index is built directly
+      (pandas skips the nonexistent times) and flagged in MeterDataSet.warnings.
   Fall-back (Apr): 50 intervals on that day.
     → The 2 intervals at 02:00–02:30 occur twice; the paired readings are
       summed and flagged in MeterDataSet.warnings.
@@ -185,16 +186,29 @@ def _block_to_series(
     intervals = list(block.intervals)
 
     if n_actual == n_expected - dst_delta:
-        # Spring-forward: dst_delta intervals missing around 02:00 local time.
-        # Interpolate all missing slots as the average of the immediate neighbours.
-        left = intervals[missing_pos - 1] if missing_pos > 0 else 0.0
-        right = intervals[missing_pos] if missing_pos < len(intervals) else 0.0
-        fill = (left + right) / 2
-        intervals = intervals[:missing_pos] + [fill] * dst_delta + intervals[missing_pos:]
+        # Spring-forward: the dst_delta intervals at 02:00 don't exist in local time.
+        # Build the tz-aware index directly so pandas skips the nonexistent wall-clock
+        # times naturally, giving exactly n_actual slots with no phantom timestamps.
+        # (Inserting interpolated values then calling tz_localize(nonexistent="shift_forward")
+        # would shift those phantoms to 03:00/03:30 — colliding with the real readings
+        # and triggering a false "revised data" warning in _records_to_dataframe.)
+        try:
+            tz_start = pd.Timestamp(
+                block.date.year, block.date.month, block.date.day, tz=MELBOURNE_TZ
+            )
+            tz_index = pd.date_range(
+                start=tz_start, periods=n_actual, freq=f"{interval_min}min"
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"tz_localize to {MELBOURNE_TZ!r} failed for {block.suffix} block on "
+                f"{block.date}: {exc}. Billing cannot continue with a corrupted timezone."
+            ) from exc
         warnings.append(
             f"{block.date} ({block.suffix}): DST spring-forward — "
-            f"{n_actual} intervals found; interpolated {dst_delta} missing intervals at 02:00."
+            f"{n_actual} intervals found; {dst_delta} nonexistent 02:00 slots omitted."
         )
+        return pd.Series(data=intervals, index=tz_index, name="kwh", dtype=float), warnings
 
     elif n_actual == n_expected + dst_delta:
         # Fall-back: the one-hour DST window (02:00 through 02:00+dst_delta-1 slots)

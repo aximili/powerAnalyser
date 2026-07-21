@@ -258,6 +258,85 @@ def test_duplicate_timestamps_keep_last_and_warn(tmp_path):
     assert "2024-06-01" in w
 
 
+# ── DST spring-forward: no false "revised data" warning (and genuine revised still warns) ──
+
+
+def test_spring_forward_produces_no_false_revised_data_warning(tmp_path):
+    """A spring-forward file must NOT emit a 'revised data' / 'Duplicate' warning.
+
+    Previously, _block_to_series interpolated the missing 02:00/02:30 slots to pad
+    to 48, then tz_localize(nonexistent="shift_forward") shifted those phantom values
+    to 03:00/03:30 — colliding with the real 03:00/03:30 readings.  The dedup step
+    in _records_to_dataframe then falsely emitted "stale interval(s) replaced by
+    revised data".  After the fix, the tz-aware index is built directly with 46 slots
+    so no phantom timestamps are created.
+    """
+    def line300(datestr, n):
+        return "300," + datestr + "," + ",".join("0.1" for _ in range(n)) + ",A,,,"
+
+    csv = "\n".join([
+        "100,NEM12,6408088506",
+        "200,6408088506,B1E1,E1,E1,,1217287,KWH,30,",
+        line300("20241006", 46),   # spring-forward: exactly 46 intervals
+        "900",
+    ]) + "\n"
+    path = tmp_path / "spring_forward_only.csv"
+    path.write_text(csv, encoding="utf-8")
+
+    meter = IngestionPipeline().load(path)
+
+    # The honest DST warning must still be present
+    dst_warnings = [w for w in meter.warnings if "spring-forward" in w.lower()]
+    assert dst_warnings, "Expected a DST spring-forward warning"
+
+    # No false "revised data" / "Duplicate" warning from the DST artifact
+    false_warnings = [
+        w for w in meter.warnings
+        if "revised" in w.lower() or "duplicate" in w.lower()
+    ]
+    assert not false_warnings, (
+        f"Spring-forward must not produce a false 'revised data' warning; got: {false_warnings}"
+    )
+
+    # Confirm exactly 46 intervals (correct for spring-forward, no padding to 48)
+    assert len(meter.e1) == 46, f"Expected 46 intervals on spring-forward day, got {len(meter.e1)}"
+
+
+def test_genuine_revised_data_still_warns(tmp_path):
+    """A genuine overlapping 300-block must still trigger the 'revised data' warning.
+
+    Ensures the spring-forward fix does NOT blanket-suppress real duplicate detection.
+    Two blocks for the same normal day: stale (0.1 kWh) then revised (0.9 kWh).
+    Pipeline must keep revised values and emit exactly one duplicate/revised warning.
+    """
+    def line300(datestr, n, val):
+        return "300," + datestr + "," + ",".join(val for _ in range(n)) + ",A,,,"
+
+    csv = "\n".join([
+        "100,NEM12,6408088506",
+        "200,6408088506,B1E1,E1,E1,,1217287,KWH,30,",
+        line300("20240601", 48, "0.1"),   # stale block
+        line300("20240601", 48, "0.9"),   # revised block — must win
+        "900",
+    ]) + "\n"
+    path = tmp_path / "genuine_revised.csv"
+    path.write_text(csv, encoding="utf-8")
+
+    meter = IngestionPipeline().load(path)
+
+    day = datetime.date(2024, 6, 1)
+    rows = meter.e1[meter.e1.index.date == day]
+    assert len(rows) == 48
+    assert (rows["kwh"].values == pytest.approx([0.9] * 48)), "Revised (0.9) values must win"
+
+    revised_warnings = [
+        w for w in meter.warnings
+        if "revised" in w.lower() or "duplicate" in w.lower()
+    ]
+    assert revised_warnings, "Expected a 'revised data' warning for genuine overlapping blocks"
+    assert "2024-06-01" in revised_warnings[0]
+
+
 # ── Timezone failure raises RuntimeError (no silent UTC fallback) ─────────────
 
 
