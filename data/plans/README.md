@@ -1,87 +1,29 @@
-# Plan JSON Schema
+# Plan JSON files
 
-Each `*.json` file in this directory represents one electricity retail offer.
+Each `*.json` file in this directory is **one electricity retail offer**. The
+loader (`tariff/loader.py`) reads every `*.json` here and validates it against
+the `ElectricityPlan` model.
 
-## Top-level fields
+## Schema — single source of truth
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `plan_id` | string | ✓ | Unique identifier (snake_case) |
-| `retailer` | string | ✓ | Retailer display name |
-| `plan_name` | string | ✓ | Plan display name |
-| `valid_from` | ISO date | | Offer start date (informational) |
-| `valid_to` | ISO date | | Offer end date (informational) |
-| `daily_supply_charge` | decimal string | ✓ | Fixed cost per day in $/day |
-| `usage_tiers` | array | ✓ | At least one tier required |
-| `free_windows` | array | | Promotional zero-rate windows |
-| `fit_tiers` | array | | Solar feed-in credit tiers |
-| `step_tariffs` | array | | Daily consumption thresholds |
+This directory does **not** duplicate the schema. To avoid drift, there is one
+reference:
 
-## TimeRange
+- **Authoritative:** the Pydantic models in
+  [`src/power_analyser/core/tariff/schema.py`](../../src/power_analyser/core/tariff/schema.py)
+  — the code that actually validates every plan.
+- **Human-readable reference:** [`docs/plan-schema.md`](../../docs/plan-schema.md)
+  — every field, every validation rule, and worked examples for each tariff
+  type. Kept in sync with `schema.py`.
 
-Used inside `usage_tiers[*].schedule`, `free_windows[*].schedule`, `fit_tiers[*].schedule`.
+Start with `docs/plan-schema.md`; consult `schema.py` when in doubt.
 
-```json
-{
-  "days": ["Mon", "Tue", "Wed", "Thu", "Fri"],
-  "start": "07:00",
-  "end": "23:00"
-}
-```
+## Sample plans in this directory
 
-- `days`: subset of `["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]`
-- `start`: inclusive, `"HH:MM"` 24-hour
-- `end`: exclusive, `"HH:MM"` 24-hour
-- **Overnight ranges** (`end <= start`, e.g. `"23:00"` → `"07:00"`) are supported
-
-An **empty `schedule` array** means the tier applies at all times on all days (catch-all / flat rate).
-
-## UsageTier
-
-```json
-{
-  "name": "Peak",
-  "rate": "0.4100",
-  "schedule": [...]
-}
-```
-
-`rate` is in $/kWh. Use decimal strings to preserve precision.
-
-## FreeWindow
-
-```json
-{
-  "name": "Midday Power Saver",
-  "schedule": [{"days": ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"], "start": "11:00", "end": "14:00"}],
-  "fair_use_cap_kwh": 2.0,
-  "overflow_tier": "Shoulder"
-}
-```
-
-- `fair_use_cap_kwh`: maximum free kWh per calendar day (`null` = no cap)
-- `overflow_tier`: name of a `UsageTier` to bill at once the cap is exceeded
-
-## FiTTier
-
-```json
-{
-  "name": "Solar FiT",
-  "rate": "0.0500",
-  "schedule": []
-}
-```
-
-Empty `schedule` = flat credit at all hours.
-
-## StepTariff
-
-```json
-{
-  "threshold_kwh_per_day": 10.0,
-  "tier_below": "Standard",
-  "tier_above": "Premium"
-}
-```
-
-The interval that crosses the threshold is split: the portion below is billed at `tier_below`, the portion above at `tier_above`.
+| File | Demonstrates |
+|---|---|
+| `sample_flat_rate.json` | Minimum valid plan (single flat usage tier) |
+| `sample_time_of_use.json` | Peak / off-peak time-of-use |
+| `sample_smart_rate_free_window.json` | 3-part Smart Rate + capped free window + time-varying FiT |
+| `sample_volume_tiered_fit.json` | Volume-tiered solar feed-in (`fit_steps`) |
+| `globird_four4free.json`, `globird_zerohero.json` | Real-world reference plans |
