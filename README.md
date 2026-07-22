@@ -2,6 +2,8 @@
 
 Victorian residential electricity plan comparison tool.
 
+Built to overcome the limitations of Victorian Energy Compare, this tool does precise energy plan comparisons tailored to your actual usage. Instead of relying on rigid annual estimates, it evaluates complex multi-tier tariffs, peak/off-peak time-of-use rates, and seasonal price shifts to find your true cheapest option.
+
 Upload your smart-meter (NEM12) data, add one or more retailer plan files, and get a ranked cost table with solar feed-in credits and optional load-shift simulation — all calculated locally with no cloud calls required.
 
 An optional AI agent (Part 2) can autonomously browse retailer websites and extract plan data to feed directly into the comparison engine.
@@ -253,3 +255,15 @@ Copy `.env.example` to `.env` and fill in as needed:
 - **DST** — Victoria uses AEDT (UTC+11) in summer and AEST (UTC+10) in winter. Spring-forward (October) days have 46 valid intervals; fall-back (April) days have 50 in the raw file (merged to 48).
 - **Free windows** — Amber/AusNet "Midday Power Saver" runs 11:00–14:00 with a 2 kWh/day fair-use cap. Overflow is billed at the shoulder rate.
 - **Solar FiT** — time-varying rates (higher during midday solar peak) are supported via `fit_tiers` with a schedule.
+
+---
+
+## ⚠️ Disclaimer
+
+This tool is an independent, open-source project designed for informational and estimation purposes only. It is not affiliated with, endorsed by, or connected to Victorian Energy Compare or the State Government of Victoria. 
+
+While every effort is made to accurately model complex tariff structures, seasonal rates, and time-of-use tiers, electricity retailer rates and supply charges change frequently. Calculation results should be used as a guide rather than financial advice. Always verify final contract terms, rates, and conditions directly with your chosen energy retailer before switching plans.
+
+## 📜 License
+
+This project is open source and available under the [MIT License](LICENSE). Feel free to use, modify, and distribute it as described in the license terms.
