@@ -131,8 +131,12 @@ A recurring window on specified days of the week.
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `days` | array of day names | yes (≥1) | Subset of `Mon..Sun`. |
-| `start` | `HH:MM` | yes | Inclusive. |
-| `end` | `HH:MM` | yes | Exclusive; `end <= start` wraps past midnight. |
+| `start` | `HH:MM` | yes | Inclusive. Must differ from `end`. |
+| `end` | `HH:MM` | yes | Exclusive; `end <= start` wraps past midnight. Must differ from `start`. |
+
+`start` and `end` must not be equal — an equal start/end would match every
+time of day and is rejected as a likely misconfiguration. Use an empty
+`schedule: []` for a genuine catch-all/all-times tier instead.
 
 ### UsageTier
 
@@ -209,6 +213,9 @@ after" (e.g. 8c on the first 10 kWh/day, 4c beyond).
 - `usage_tiers` must contain **at least one** entry.
 - All rates and the supply charge must be `≥ 0`; `threshold_kwh_per_day > 0`.
 - `TimeRange.days` must be **non-empty**.
+- `TimeRange.start` and `TimeRange.end` must **differ** (an equal start/end
+  would match all times — use an empty `schedule` for a catch-all instead).
+- `FreeWindow.overflow_tier` is **required** whenever `fair_use_cap_kwh` is set.
 - Every **name reference** must point to an existing tier:
   - `FreeWindow.overflow_tier` → `usage_tiers[].name`
   - `StepTariff.tier_below` / `StepTariff.tier_above` → `usage_tiers[].name`
