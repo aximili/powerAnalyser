@@ -52,8 +52,9 @@ coverage.xml
 playwright-report/
 test-results/
 
-# Claude Code project data
+# Local AI assistant
 .claude/
+.kilo/
 
 # Byte-compiled
 *.pyc
